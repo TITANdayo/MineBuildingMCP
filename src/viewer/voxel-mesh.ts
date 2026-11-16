@@ -1309,7 +1309,6 @@ export function filterVoxelsForCutaway(
     total: number;
     nextYCount: number;
   }> = [];
-  let maxCoveredByAir = 0;
 
   for (const [y, list] of structuralByY.entries()) {
     if (y >= cutY) continue;
@@ -1319,29 +1318,32 @@ export function filterVoxelsForCutaway(
         coveredByAir++;
       }
     }
-    if (coveredByAir > maxCoveredByAir) {
-      maxCoveredByAir = coveredByAir;
-    }
     const nextYCount = structuralByY.get(y + 1)?.length ?? 0;
     yFloorStats.push({ y, coveredByAir, total: list.length, nextYCount });
   }
 
   yFloorStats.sort((a, b) => a.y - b.y);
 
+  // Evaluate wall-supporting floors (nextYCount >= 4) first so flat roofs (nextYCount === 0)
+  // and larger upper stories cannot shadow or disqualify genuine smaller lower floor slabs.
+  const wallSupportingFloors = yFloorStats.filter(
+    (s) => s.total >= 9 && s.nextYCount >= 4
+  );
+  let maxSupportingCovered = 0;
+  for (const s of wallSupportingFloors) {
+    if (s.coveredByAir > maxSupportingCovered) {
+      maxSupportingCovered = s.coveredByAir;
+    }
+  }
+
   const floorSlabYs: number[] = [];
-  if (maxCoveredByAir >= 4) {
-    const threshold = Math.max(4, maxCoveredByAir * 0.5);
-    const primary =
-      yFloorStats.find(
-        (s) => s.coveredByAir >= threshold && s.total >= 9 && s.nextYCount >= 4
-      ) ?? yFloorStats.find((s) => s.coveredByAir >= threshold && s.total >= 9);
+  if (maxSupportingCovered >= 4) {
+    const primary = wallSupportingFloors.find((s) => s.coveredByAir >= 4);
     if (primary) {
       floorSlabYs.push(primary.y);
-      for (const stat of yFloorStats) {
+      for (const stat of wallSupportingFloors) {
         if (
-          stat.y >= primary.y + 3 &&
-          stat.total >= 9 &&
-          stat.nextYCount >= 4 &&
+          stat.y >= floorSlabYs[floorSlabYs.length - 1] + 3 &&
           (stat.coveredByAir >= 4 ||
             (stat.total <= 25 && stat.coveredByAir >= 2))
         ) {
@@ -1349,28 +1351,33 @@ export function filterVoxelsForCutaway(
         }
       }
     }
-  } else if (maxCoveredByAir >= 1) {
+  } else if (maxSupportingCovered >= 1) {
     // Handles small furnished rooms (e.g., 4x4 tower on sloped terrain where coveredByAir is 1..3)
-    const primary = yFloorStats.find(
-      (s) => s.coveredByAir >= 1 && s.total >= 9 && s.nextYCount >= 4
-    );
+    const primary = wallSupportingFloors.find((s) => s.coveredByAir >= 1);
     if (primary) {
       floorSlabYs.push(primary.y);
-      for (const stat of yFloorStats) {
+      for (const stat of wallSupportingFloors) {
         if (
-          stat.y >= primary.y + 3 &&
-          stat.total >= 9 &&
-          stat.nextYCount >= 4 &&
+          stat.y >= floorSlabYs[floorSlabYs.length - 1] + 3 &&
           stat.coveredByAir >= 2
         ) {
           floorSlabYs.push(stat.y);
         }
       }
     }
+  } else {
+    // Only fall back to nextYCount === 0 for ground-level open platforms (s.y === minBY),
+    // never for flat roofs sitting above walls.
+    const platform = yFloorStats.find(
+      (s) => s.y === minBY && s.coveredByAir >= 4 && s.total >= 9
+    );
+    if (platform) {
+      floorSlabYs.push(platform.y);
+    }
   }
 
   const floorSlabSet = new Set(floorSlabYs);
-  const lowestFloorY = floorSlabYs.length > 0 ? floorSlabYs[0] : Infinity;
+  const lowestFloorY = floorSlabYs.length > 0 ? floorSlabYs[0] : -Infinity;
 
   interface StoryRange {
     floorY: number;
@@ -1543,16 +1550,28 @@ export function filterVoxelsForCutaway(
         if (curMaxZ === undefined || c.z > curMaxZ) maxZByX.set(c.x, c.z);
       }
 
+      const wallColSet = new Set<string>();
+      for (const c of wallCols) {
+        wallColSet.add(`${c.x},${c.z}`);
+      }
+
       // Helper: avoid punching a hole in the back wall when the front wall has an open doorway/window
+      // or a full-height open archway/gap without an overhead lintel.
       const hasFrontLintelInDirection = (
         x: number,
         z: number,
         dx: number,
         dz: number
       ): boolean => {
-        if (!nonTerrainCoords.has(`${x + dx},${story.floorY},${z + dz}`)) {
+        const hasBuiltFloor = floorSlabYs.length > 0;
+        if (
+          hasBuiltFloor &&
+          !nonTerrainCoords.has(`${x + dx},${story.floorY},${z + dz}`)
+        ) {
           return false;
         }
+        const px = dz !== 0 ? 1 : 0;
+        const pz = dx !== 0 ? 1 : 0;
         const maxScan = 32;
         const maxCheckY = Math.min(story.minY + 5, story.topY);
         for (let step = 2; step <= maxScan; step++) {
@@ -1561,6 +1580,40 @@ export function filterVoxelsForCutaway(
           for (let y = story.minY + 1; y <= maxCheckY; y++) {
             if (allStructuralCoords.has(`${tx},${y},${tz}`)) {
               return true;
+            }
+          }
+          // Full-height open front gap without lintel: check for flanking front-wall jambs
+          // perpendicular to the ray at this step, with floor/ground inside the threshold.
+          if (
+            !wallColSet.has(`${tx},${tz}`) &&
+            (!hasBuiltFloor ||
+              nonTerrainCoords.has(`${tx},${story.floorY},${tz}`) ||
+              nonTerrainCoords.has(`${tx - dx},${story.floorY},${tz - dz}`))
+          ) {
+            let kNeg = 0;
+            for (let k = 1; k <= 3; k++) {
+              if (wallColSet.has(`${tx - px * k},${tz - pz * k}`)) {
+                kNeg = k;
+                break;
+              }
+            }
+            let kPos = 0;
+            for (let k = 1; k <= 3; k++) {
+              if (wallColSet.has(`${tx + px * k},${tz + pz * k}`)) {
+                kPos = k;
+                break;
+              }
+            }
+            if (kNeg > 0 && kPos > 0 && kNeg + kPos - 1 <= 3) {
+              const negBehindIsWall = wallColSet.has(
+                `${tx - px * kNeg - dx},${tz - pz * kNeg - dz}`
+              );
+              const posBehindIsWall = wallColSet.has(
+                `${tx + px * kPos - dx},${tz + pz * kPos - dz}`
+              );
+              if (!negBehindIsWall || !posBehindIsWall) {
+                return true;
+              }
             }
           }
         }

@@ -1269,4 +1269,172 @@ describe("MineBuildingMCP End-to-End Verification", () => {
     expect(hasVoxel(cut2E2, 15, 16, 13)).toBe(false);
     expect(hasVoxel(cut2E2, 13, 15, 13)).toBe(true);
   });
+
+  it("15. Fixes filterVoxelsForCutaway for flat-roof cutY=roofY+1 (3A), small-1F/large-2F (3B), terrain-floor (3C), and full-height open front gaps (3D)", async () => {
+    const { filterVoxelsForCutaway } = await import("../src/viewer/voxel-mesh.js");
+    const { VoxelWorld } = await import("../src/core/voxel-world.js");
+    const hasVoxel = (list: ReturnType<typeof filterVoxelsForCutaway>, x: number, y: number, z: number) =>
+      list.some((v) => v.x === x && v.y === y && v.z === z);
+
+    // 3A: 1-story flat-roofed house with 2 interior furniture blocks sliced at cutY = roofY + 1
+    const house3A = new VoxelWorld([24, 16, 24]);
+    for (let x = 8; x <= 14; x++) {
+      for (let z = 8; z <= 14; z++) {
+        house3A.setVoxel(x, 4, z, "minecraft:stone_bricks", undefined, false, 1);
+        house3A.setVoxel(x, 9, z, "minecraft:stone_bricks", undefined, false, 1);
+        if (x === 8 || x === 14 || z === 8 || z === 14) {
+          for (let y = 5; y <= 8; y++) {
+            house3A.setVoxel(x, y, z, "minecraft:oak_planks", undefined, false, 2);
+          }
+        }
+      }
+    }
+    house3A.setVoxel(11, 5, 11, "minecraft:crafting_table", undefined, false, 3);
+    house3A.setVoxel(10, 5, 10, "minecraft:chest", undefined, false, 3);
+
+    for (const view of ["NE", "SE", "SW", "NW"] as const) {
+      const cut3A = filterVoxelsForCutaway(house3A.getAllVoxels(), 10, view);
+      expect(hasVoxel(cut3A, 14, 6, 11)).toBe(view === "SW" || view === "NW");
+      expect(hasVoxel(cut3A, 8, 6, 11)).toBe(view === "NE" || view === "SE");
+      expect(hasVoxel(cut3A, 11, 6, 8)).toBe(view === "SE" || view === "SW");
+      expect(hasVoxel(cut3A, 11, 6, 14)).toBe(view === "NE" || view === "NW");
+      expect(hasVoxel(cut3A, 11, 5, 11)).toBe(true);
+    }
+
+    // 3B: Small 1F (5x5, y=4..8) + larger 2F (9x9, y=9..14) sliced at cutY=12
+    const house3B = new VoxelWorld([28, 20, 28]);
+    for (let x = 12; x <= 16; x++) {
+      for (let z = 12; z <= 16; z++) {
+        house3B.setVoxel(x, 4, z, "minecraft:stone_bricks", undefined, false, 1);
+        if (x === 12 || x === 16 || z === 12 || z === 16) {
+          for (let y = 5; y <= 8; y++) {
+            house3B.setVoxel(x, y, z, "minecraft:oak_planks", undefined, false, 2);
+          }
+        }
+      }
+    }
+    for (let x = 10; x <= 18; x++) {
+      for (let z = 10; z <= 18; z++) {
+        house3B.setVoxel(x, 9, z, "minecraft:stone_bricks", undefined, false, 1);
+        house3B.setVoxel(x, 14, z, "minecraft:stone_bricks", undefined, false, 1);
+        if (x === 10 || x === 18 || z === 10 || z === 18) {
+          for (let y = 10; y <= 13; y++) {
+            house3B.setVoxel(x, y, z, "minecraft:oak_planks", undefined, false, 2);
+          }
+        }
+      }
+    }
+    const cut3B = filterVoxelsForCutaway(house3B.getAllVoxels(), 12, "NE");
+    expect(hasVoxel(cut3B, 16, 6, 14)).toBe(false);
+    expect(hasVoxel(cut3B, 14, 6, 12)).toBe(false);
+    expect(hasVoxel(cut3B, 12, 6, 14)).toBe(true);
+    expect(hasVoxel(cut3B, 18, 11, 14)).toBe(false);
+    expect(hasVoxel(cut3B, 14, 11, 10)).toBe(false);
+    expect(hasVoxel(cut3B, 18, 9, 14)).toBe(true);
+
+    // 3C: Terrain-floor house with no artificial floor slab + north doorway
+    const house3C = new VoxelWorld([20, 12, 20]);
+    for (let x = 0; x < 20; x++) {
+      for (let z = 0; z < 20; z++) {
+        house3C.setVoxel(x, 0, z, "minecraft:grass_block", undefined, true, 0);
+      }
+    }
+    for (let x = 5; x <= 13; x++) {
+      for (let z = 5; z <= 13; z++) {
+        house3C.setVoxel(x, 5, z, "minecraft:stone_bricks", undefined, false, 1);
+        if (x === 5 || x === 13 || z === 5 || z === 13) {
+          for (let y = 1; y <= 4; y++) {
+            if (x === 9 && z === 5 && y <= 2) continue;
+            house3C.setVoxel(x, y, z, "minecraft:oak_planks", undefined, false, 2);
+          }
+        }
+      }
+    }
+    const cut3C = filterVoxelsForCutaway(house3C.getAllVoxels(), 3, "NE");
+    expect(hasVoxel(cut3C, 7, 2, 5)).toBe(false);
+    expect(hasVoxel(cut3C, 13, 2, 9)).toBe(false);
+    expect(hasVoxel(cut3C, 9, 2, 13)).toBe(true);
+    expect(hasVoxel(cut3C, 8, 2, 13)).toBe(true);
+    expect(hasVoxel(cut3C, 5, 2, 9)).toBe(true);
+
+    // 3D: Built-floor house with lintelled doorway (x=8) & full-height open front gap without lintel (x=10..11)
+    const house3D = new VoxelWorld([24, 16, 24]);
+    for (let x = 6; x <= 14; x++) {
+      for (let z = 6; z <= 14; z++) {
+        house3D.setVoxel(x, 4, z, "minecraft:stone_bricks", undefined, false, 1);
+        house3D.setVoxel(x, 9, z, "minecraft:stone_bricks", undefined, false, 1);
+        if (x === 6 || x === 14 || z === 6 || z === 14) {
+          for (let y = 5; y <= 8; y++) {
+            if (x === 8 && z === 6 && y <= 6) continue; // lintelled doorway
+            if ((x === 10 || x === 11) && z === 6) continue; // full-height open gap without lintel
+            house3D.setVoxel(x, y, z, "minecraft:oak_planks", undefined, false, 2);
+          }
+        }
+      }
+    }
+    const cut3D = filterVoxelsForCutaway(house3D.getAllVoxels(), 7, "NE");
+    expect(hasVoxel(cut3D, 8, 6, 14)).toBe(true);
+    expect(hasVoxel(cut3D, 10, 6, 14)).toBe(true);
+    expect(hasVoxel(cut3D, 11, 6, 14)).toBe(true);
+    expect(hasVoxel(cut3D, 12, 6, 6)).toBe(false);
+    expect(hasVoxel(cut3D, 14, 6, 10)).toBe(false);
+
+    // 3E: U-shaped courtyard (open North) peels inner south courtyard wall while preserving wings
+    const house3E = new VoxelWorld([28, 16, 28]);
+    const insideU = (x: number, z: number) =>
+      (x >= 7 && x <= 9 && z >= 7 && z <= 19) ||
+      (x >= 17 && x <= 19 && z >= 7 && z <= 19) ||
+      (x >= 7 && x <= 19 && z >= 16 && z <= 19);
+    for (let x = 6; x <= 20; x++) {
+      for (let z = 6; z <= 20; z++) {
+        const inside = insideU(x, z);
+        const wall =
+          !inside &&
+          (insideU(x + 1, z) ||
+            insideU(x - 1, z) ||
+            insideU(x, z + 1) ||
+            insideU(x, z - 1) ||
+            insideU(x + 1, z + 1) ||
+            insideU(x - 1, z - 1) ||
+            insideU(x + 1, z - 1) ||
+            insideU(x - 1, z + 1));
+        if (inside || wall) {
+          house3E.setVoxel(x, 4, z, "minecraft:stone_bricks", undefined, false, 1);
+          house3E.setVoxel(x, 9, z, "minecraft:stone_bricks", undefined, false, 1);
+          if (wall) {
+            for (let y = 5; y <= 8; y++) {
+              house3E.setVoxel(x, y, z, "minecraft:oak_planks", undefined, false, 2);
+            }
+          }
+        }
+      }
+    }
+    const cut3E = filterVoxelsForCutaway(house3E.getAllVoxels(), 7, "NE");
+    expect(hasVoxel(cut3E, 14, 6, 15)).toBe(false);
+    expect(hasVoxel(cut3E, 20, 6, 12)).toBe(false);
+    expect(hasVoxel(cut3E, 6, 6, 12)).toBe(true);
+    expect(hasVoxel(cut3E, 14, 6, 20)).toBe(true);
+
+    // 3H2: 2-room partition wall with doorways preserves partition & back wall
+    const house3H2 = new VoxelWorld([24, 16, 24]);
+    for (let x = 6; x <= 18; x++) {
+      for (let z = 6; z <= 14; z++) {
+        house3H2.setVoxel(x, 4, z, "minecraft:stone_bricks", undefined, false, 1);
+        house3H2.setVoxel(x, 9, z, "minecraft:stone_bricks", undefined, false, 1);
+        if (x === 6 || x === 18 || z === 6 || z === 14 || x === 12) {
+          for (let y = 5; y <= 8; y++) {
+            if (x === 9 && z === 6 && y <= 6) continue;
+            if (x === 12 && z === 10 && y <= 6) continue;
+            house3H2.setVoxel(x, y, z, "minecraft:oak_planks", undefined, false, 2);
+          }
+        }
+      }
+    }
+    const cut3H2 = filterVoxelsForCutaway(house3H2.getAllVoxels(), 7, "NE");
+    expect(hasVoxel(cut3H2, 7, 6, 6)).toBe(false);
+    expect(hasVoxel(cut3H2, 18, 6, 10)).toBe(false);
+    expect(hasVoxel(cut3H2, 12, 6, 8)).toBe(true);
+    expect(hasVoxel(cut3H2, 9, 6, 14)).toBe(true);
+    expect(hasVoxel(cut3H2, 6, 6, 10)).toBe(true);
+  });
 });
