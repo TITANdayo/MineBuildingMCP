@@ -1635,4 +1635,342 @@ describe("MineBuildingMCP End-to-End Verification", () => {
     expect(hasVoxel(cutAdv2b, 6, 5, 9)).toBe(true);
     expect(hasVoxel(cutAdv2b, 12, 10, 9)).toBe(false);
   });
+
+  it("17. Iteration 6 regressions: fence+slab tables with chairs/2x2, y=2 aperture bleed, carpet threshold, Edge 1-5d, and Adv4", async () => {
+    const { VoxelWorld } = await import("../src/core/voxel-world.js");
+    const { filterVoxelsForCutaway } = await import("../src/viewer/voxel-mesh.js");
+    const hasVoxel = (list: ReturnType<typeof filterVoxelsForCutaway>, x: number, y: number, z: number) =>
+      list.some((v) => v.x === x && v.y === y && v.z === z);
+
+    const buildSealedRoom = (innerSize: number, wallHeight: number, openDoor = false) => {
+      const maxC = 3 + innerSize + 1;
+      const ceilY = 1 + wallHeight;
+      const w = new VoxelWorld([maxC + 4, ceilY + 4, maxC + 4]);
+      for (let x = 3; x <= maxC; x++) {
+        for (let z = 3; z <= maxC; z++) {
+          w.setVoxel(x, 0, z, "minecraft:stone_bricks", undefined, false, 1);
+          w.setVoxel(x, ceilY, z, "minecraft:stone_bricks", undefined, false, 1);
+          if (x === 3 || x === maxC || z === 3 || z === maxC) {
+            for (let y = 1; y < ceilY; y++) {
+              if (openDoor && x === 7 && z === 3 && y <= 2) continue;
+              w.setVoxel(x, y, z, "minecraft:oak_planks", undefined, false, 1);
+            }
+          }
+        }
+      }
+      w.setVoxel(6, wallHeight, 6, "minecraft:lantern", { hanging: "true" }, false, 2);
+      return w;
+    };
+
+    // 1. Case A (3-tall & 2-tall): placeTable(fence+slab) + 2 adjacent chairs in sealed room -> no phantom doors
+    for (const [h, expectedVol] of [[3, 75], [2, 50]] as const) {
+      const caseA = buildSealedRoom(5, h);
+      executeBuildScript(
+        caseA,
+        [
+          'placeTable(5, 1, 5, "minecraft:oak_fence", "minecraft:oak_slab");',
+          'placeChair(6, 1, 5, "minecraft:oak_stairs", "west");',
+          'placeChair(5, 1, 6, "minecraft:oak_stairs", "north");',
+        ].join("\n"),
+        false
+      );
+      const repA = caseA.detectInteriorRooms();
+      expect(repA.rooms.length).toBe(1);
+      expect(repA.rooms[0].doors).toEqual([]);
+      expect(repA.rooms[0].volume).toBe(expectedVol);
+      expect(repA.flowIssues.some((i) => i.type === "isolated_room")).toBe(true);
+      expect(repA.validFlow).toBe(false);
+    }
+
+    // 2. Case B (3-tall & 2-tall): 2x2 fence+slab table in sealed 7x7 room -> no phantom doors
+    for (const [h, expectedVol] of [[3, 147], [2, 98]] as const) {
+      const caseB = buildSealedRoom(7, h);
+      executeBuildScript(
+        caseB,
+        [
+          'placeTable(5, 1, 5, "minecraft:oak_fence", "minecraft:oak_slab");',
+          'placeTable(6, 1, 5, "minecraft:oak_fence", "minecraft:oak_slab");',
+          'placeTable(5, 1, 6, "minecraft:oak_fence", "minecraft:oak_slab");',
+          'placeTable(6, 1, 6, "minecraft:oak_fence", "minecraft:oak_slab");',
+        ].join("\n"),
+        false
+      );
+      const repB = caseB.detectInteriorRooms();
+      expect(repB.rooms.length).toBe(1);
+      expect(repB.rooms[0].doors).toEqual([]);
+      expect(repB.rooms[0].volume).toBe(expectedVol);
+      expect(repB.flowIssues.some((i) => i.type === "isolated_room")).toBe(true);
+      expect(repB.validFlow).toBe(false);
+    }
+
+    // 3. Case C: open room with 1 real oak_door + table + 2 chairs -> only oak_door detected
+    const caseC = buildSealedRoom(5, 3, true);
+    executeBuildScript(
+      caseC,
+      [
+        'placeDoor(7, 1, 3, "minecraft:oak_door", "south");',
+        'placeTable(5, 1, 5, "minecraft:oak_fence", "minecraft:oak_slab");',
+        'placeChair(6, 1, 5, "minecraft:oak_stairs", "west");',
+        'placeChair(5, 1, 6, "minecraft:oak_stairs", "north");',
+      ].join("\n"),
+      false
+    );
+    const repC = caseC.detectInteriorRooms();
+    expect(repC.rooms.length).toBe(1);
+    expect(repC.rooms[0].doors.length).toBe(1);
+    expect(repC.rooms[0].doors[0].block).toBe("minecraft:oak_door");
+    expect(repC.rooms[0].volume).toBe(75);
+    expect(repC.validFlow).toBe(true);
+
+    // 4. NewAdv 3 & 6: isolated fence+slab table has zero y=2 aperture bleed (3-tall & 2-tall)
+    for (const [h, expectedVol] of [[3, 75], [2, 50]] as const) {
+      const bleedW = buildSealedRoom(5, h);
+      executeBuildScript(bleedW, 'placeTable(5, 1, 5, "minecraft:oak_fence", "minecraft:oak_slab");', false);
+      const repBleed = bleedW.detectInteriorRooms();
+      expect(repBleed.rooms.length).toBe(1);
+      expect(repBleed.rooms[0].doors).toEqual([]);
+      expect(repBleed.rooms[0].volume).toBe(expectedVol);
+    }
+
+    // 5. NewAdv 8: red_carpet on open doorway threshold is detected as unblocked doorway_opening
+    const carpetDoorW = new VoxelWorld([15, 10, 15]);
+    for (let x = 3; x <= 9; x++) {
+      for (let z = 3; z <= 9; z++) {
+        carpetDoorW.setVoxel(x, 0, z, "minecraft:stone_bricks", undefined, false, 1);
+        carpetDoorW.setVoxel(x, 4, z, "minecraft:stone_bricks", undefined, false, 1);
+        if (x === 3 || x === 9 || z === 3 || z === 9) {
+          for (let y = 1; y <= 3; y++) {
+            if (x === 6 && z === 3 && y <= 2) continue;
+            carpetDoorW.setVoxel(x, y, z, "minecraft:oak_planks", undefined, false, 1);
+          }
+        }
+      }
+    }
+    carpetDoorW.setVoxel(6, 3, 6, "minecraft:lantern", { hanging: "true" }, false, 2);
+    carpetDoorW.setVoxel(6, 1, 3, "minecraft:red_carpet", undefined, false, 3);
+    const repCarpet = carpetDoorW.detectInteriorRooms();
+    expect(repCarpet.rooms.length).toBe(1);
+    expect(repCarpet.rooms[0].doors.length).toBe(1);
+    expect(repCarpet.rooms[0].doors[0].blocked).toBe(false);
+    expect(repCarpet.rooms[0].volume).toBe(75);
+    expect(repCarpet.validFlow).toBe(true);
+
+    // 6. Edge 1: 7x7 solid foundation y=12..13 + 1 exterior step block preserves y=14 floor slab perimeter
+    const edge1 = new VoxelWorld([24, 24, 24]);
+    for (let x = 10; x <= 16; x++) {
+      for (let z = 10; z <= 16; z++) {
+        edge1.setVoxel(x, 12, z, "minecraft:stone_bricks", undefined, false, 1);
+        edge1.setVoxel(x, 13, z, "minecraft:stone_bricks", undefined, false, 1);
+        edge1.setVoxel(x, 14, z, "minecraft:stone_bricks", undefined, false, 1);
+        edge1.setVoxel(x, 19, z, "minecraft:stone_bricks", undefined, false, 1);
+        if (x === 10 || x === 16 || z === 10 || z === 16) {
+          for (let y = 15; y <= 18; y++) {
+            edge1.setVoxel(x, y, z, "minecraft:oak_planks", undefined, false, 2);
+          }
+        }
+      }
+    }
+    edge1.setVoxel(13, 13, 9, "minecraft:stone_brick_stairs", { facing: "south" }, false, 3);
+    for (const view of ["NE", "SE", "SW", "NW"] as const) {
+      const cutE1 = filterVoxelsForCutaway(edge1.getAllVoxels(), 17, view);
+      expect(hasVoxel(cutE1, 16, 14, 13)).toBe(true);
+      expect(hasVoxel(cutE1, 10, 14, 13)).toBe(true);
+      expect(hasVoxel(cutE1, 11, 14, 10)).toBe(true);
+      expect(hasVoxel(cutE1, 13, 14, 16)).toBe(true);
+    }
+
+    // 7. Edge 4b: sloped terrain + east patio overhang + dock block y=10 preserves foundation wall y=12
+    const edge4b = await loadStructureNbt(sampleNbtPath);
+    executeBuildScript(
+      edge4b,
+      [
+        'placeFoundation(12, 12, 18, 18, 14, "stone_bricks");',
+        'buildWall(12, 12, 18, 18, 4, "oak_planks", false);',
+      ].join("\n"),
+      true
+    );
+    for (let x = 19; x <= 20; x++) {
+      for (let z = 12; z <= 18; z++) {
+        edge4b.setVoxel(x, 14, z, "minecraft:oak_planks", undefined, false, 3);
+      }
+    }
+    edge4b.setVoxel(20, 10, 15, "minecraft:oak_planks", undefined, false, 4);
+    const cutE4b = filterVoxelsForCutaway(edge4b.getAllVoxels(), 17, "NE");
+    expect(hasVoxel(cutE4b, 18, 12, 15)).toBe(true);
+    expect(hasVoxel(cutE4b, 15, 12, 12)).toBe(true);
+    expect(hasVoxel(cutE4b, 18, 16, 15)).toBe(false);
+    expect(hasVoxel(cutE4b, 15, 16, 12)).toBe(false);
+
+    // 8. Edge 3: Terrain-floor 2-story + 4 chests on 1F peels 1F y=1 walls alongside 2F
+    const edge3 = new VoxelWorld([20, 16, 20]);
+    for (let x = 0; x < 20; x++) {
+      for (let z = 0; z < 20; z++) {
+        edge3.setVoxel(x, 0, z, "minecraft:grass_block", undefined, true, 0);
+      }
+    }
+    for (let x = 5; x <= 13; x++) {
+      for (let z = 5; z <= 13; z++) {
+        edge3.setVoxel(x, 5, z, "minecraft:stone_bricks", undefined, false, 1);
+        edge3.setVoxel(x, 10, z, "minecraft:stone_bricks", undefined, false, 1);
+        if (x === 5 || x === 13 || z === 5 || z === 13) {
+          for (let y = 1; y <= 4; y++) edge3.setVoxel(x, y, z, "minecraft:oak_planks", undefined, false, 2);
+          for (let y = 6; y <= 9; y++) edge3.setVoxel(x, y, z, "minecraft:oak_planks", undefined, false, 2);
+        }
+      }
+    }
+    for (let x = 6; x <= 9; x++) {
+      edge3.setVoxel(x, 1, 6, "minecraft:chest", undefined, false, 3);
+    }
+    const cutE3 = filterVoxelsForCutaway(edge3.getAllVoxels(), 8, "NE");
+    expect(hasVoxel(cutE3, 13, 1, 9)).toBe(false);
+    expect(hasVoxel(cutE3, 13, 2, 9)).toBe(false);
+    expect(hasVoxel(cutE3, 9, 1, 5)).toBe(false);
+    expect(hasVoxel(cutE3, 5, 2, 9)).toBe(true);
+    expect(hasVoxel(cutE3, 6, 1, 6)).toBe(true);
+    expect(hasVoxel(cutE3, 13, 7, 9)).toBe(false);
+    expect(hasVoxel(cutE3, 13, 5, 9)).toBe(true);
+
+    // 9. Edge 2: 5x5 with 8/9 chests + red_carpet and 9/9 chests peels y=5 walls while keeping y=4 floor
+    const buildEdge2 = (useCarpet: boolean) => {
+      const w = new VoxelWorld([20, 16, 20]);
+      for (let x = 8; x <= 12; x++) {
+        for (let z = 8; z <= 12; z++) {
+          w.setVoxel(x, 4, z, "minecraft:stone_bricks", undefined, false, 1);
+          w.setVoxel(x, 9, z, "minecraft:stone_bricks", undefined, false, 1);
+          if (x === 8 || x === 12 || z === 8 || z === 12) {
+            for (let y = 5; y <= 8; y++) w.setVoxel(x, y, z, "minecraft:oak_planks", undefined, false, 2);
+          }
+        }
+      }
+      for (let x = 9; x <= 11; x++) {
+        for (let z = 9; z <= 11; z++) {
+          if (useCarpet && x === 11 && z === 11) {
+            w.setVoxel(x, 5, z, "minecraft:red_carpet", undefined, false, 3);
+          } else {
+            w.setVoxel(x, 5, z, "minecraft:chest", undefined, false, 3);
+          }
+        }
+      }
+      return w;
+    };
+    const cutE2Carpet = filterVoxelsForCutaway(buildEdge2(true).getAllVoxels(), 7, "NE");
+    expect(hasVoxel(cutE2Carpet, 12, 5, 10)).toBe(false);
+    expect(hasVoxel(cutE2Carpet, 10, 5, 8)).toBe(false);
+    expect(hasVoxel(cutE2Carpet, 8, 5, 10)).toBe(true);
+    expect(hasVoxel(cutE2Carpet, 12, 4, 10)).toBe(true);
+    expect(hasVoxel(cutE2Carpet, 11, 5, 11)).toBe(true);
+
+    const cutE2Full = filterVoxelsForCutaway(buildEdge2(false).getAllVoxels(), 7, "NE");
+    expect(hasVoxel(cutE2Full, 12, 5, 10)).toBe(false);
+    expect(hasVoxel(cutE2Full, 10, 5, 8)).toBe(false);
+    expect(hasVoxel(cutE2Full, 8, 5, 10)).toBe(true);
+    expect(hasVoxel(cutE2Full, 12, 4, 10)).toBe(true);
+    expect(hasVoxel(cutE2Full, 9, 5, 9)).toBe(true);
+
+    // 10. Adv4: 4x4 furnished 1F + 9x9 2F peels both 1F and 2F camera-facing walls
+    const adv4 = new VoxelWorld([28, 20, 28]);
+    for (let x = 12; x <= 15; x++) {
+      for (let z = 12; z <= 15; z++) {
+        adv4.setVoxel(x, 4, z, "minecraft:stone_bricks", undefined, false, 1);
+        if (x === 12 || x === 15 || z === 12 || z === 15) {
+          for (let y = 5; y <= 8; y++) adv4.setVoxel(x, y, z, "minecraft:oak_planks", undefined, false, 2);
+        }
+      }
+    }
+    adv4.setVoxel(13, 5, 13, "minecraft:chest", undefined, false, 3);
+    adv4.setVoxel(14, 5, 13, "minecraft:chest", undefined, false, 3);
+    for (let x = 10; x <= 18; x++) {
+      for (let z = 10; z <= 18; z++) {
+        adv4.setVoxel(x, 9, z, "minecraft:stone_bricks", undefined, false, 1);
+        adv4.setVoxel(x, 14, z, "minecraft:stone_bricks", undefined, false, 1);
+        if (x === 10 || x === 18 || z === 10 || z === 18) {
+          for (let y = 10; y <= 13; y++) adv4.setVoxel(x, y, z, "minecraft:oak_planks", undefined, false, 2);
+        }
+      }
+    }
+    const cutAdv4 = filterVoxelsForCutaway(adv4.getAllVoxels(), 12, "NE");
+    expect(hasVoxel(cutAdv4, 15, 6, 13)).toBe(false);
+    expect(hasVoxel(cutAdv4, 13, 6, 12)).toBe(false);
+    expect(hasVoxel(cutAdv4, 12, 6, 13)).toBe(true);
+    expect(hasVoxel(cutAdv4, 18, 11, 14)).toBe(false);
+    expect(hasVoxel(cutAdv4, 14, 11, 10)).toBe(false);
+    expect(hasVoxel(cutAdv4, 18, 9, 14)).toBe(true);
+
+    // 11. Edge 5a: L-shape + patio + y=9 eaves peels re-entrant wing outer column (15,6,17)
+    const edge5a = new VoxelWorld([28, 16, 28]);
+    const inside5a = (x: number, z: number) =>
+      (x >= 11 && x <= 19 && z >= 11 && z <= 13) ||
+      (x >= 11 && x <= 14 && z >= 14 && z <= 18);
+    for (let x = 10; x <= 20; x++) {
+      for (let z = 10; z <= 19; z++) {
+        const inside = inside5a(x, z);
+        const wall =
+          !inside &&
+          (inside5a(x + 1, z) || inside5a(x - 1, z) || inside5a(x, z + 1) || inside5a(x, z - 1) ||
+            inside5a(x + 1, z + 1) || inside5a(x - 1, z - 1) || inside5a(x + 1, z - 1) || inside5a(x - 1, z + 1));
+        if (inside || wall) {
+          edge5a.setVoxel(x, 4, z, "minecraft:stone_bricks", undefined, false, 1);
+          edge5a.setVoxel(x, 9, z, "minecraft:stone_bricks", undefined, false, 1);
+          if (wall) {
+            for (let y = 5; y <= 8; y++) edge5a.setVoxel(x, y, z, "minecraft:oak_planks", undefined, false, 2);
+          }
+        }
+      }
+    }
+    for (let x = 16; x <= 20; x++) {
+      for (let z = 15; z <= 19; z++) {
+        edge5a.setVoxel(x, 4, z, "minecraft:stone_bricks", undefined, false, 3);
+      }
+      edge5a.setVoxel(x, 9, 15, "minecraft:stone_bricks", undefined, false, 3);
+    }
+    edge5a.setVoxel(16, 9, 17, "minecraft:stone_bricks", undefined, false, 3);
+    const cutE5a = filterVoxelsForCutaway(edge5a.getAllVoxels(), 7, "NE");
+    expect(hasVoxel(cutE5a, 15, 6, 17)).toBe(false);
+
+    // 12. Edge 5b: Covered porch + west side wall peels north wall (11,6,10) & (12,6,10)
+    const edge5b = new VoxelWorld([28, 16, 28]);
+    for (let x = 10; x <= 18; x++) {
+      for (let z = 10; z <= 18; z++) {
+        edge5b.setVoxel(x, 4, z, "minecraft:stone_bricks", undefined, false, 1);
+        edge5b.setVoxel(x, 9, z, "minecraft:stone_bricks", undefined, false, 1);
+        if (x === 10 || x === 18 || z === 10 || z === 18) {
+          for (let y = 5; y <= 8; y++) edge5b.setVoxel(x, y, z, "minecraft:oak_planks", undefined, false, 2);
+        }
+      }
+      for (let z = 7; z <= 9; z++) {
+        edge5b.setVoxel(x, 4, z, "minecraft:stone_bricks", undefined, false, 1);
+        edge5b.setVoxel(x, 9, z, "minecraft:stone_bricks", undefined, false, 1);
+        if (x === 10) {
+          for (let y = 5; y <= 8; y++) edge5b.setVoxel(x, y, z, "minecraft:oak_planks", undefined, false, 2);
+        }
+      }
+    }
+    const cutE5b = filterVoxelsForCutaway(edge5b.getAllVoxels(), 7, "NE");
+    expect(hasVoxel(cutE5b, 11, 6, 10)).toBe(false);
+    expect(hasVoxel(cutE5b, 12, 6, 10)).toBe(false);
+    expect(hasVoxel(cutE5b, 18, 6, 14)).toBe(false);
+    expect(hasVoxel(cutE5b, 14, 6, 18)).toBe(true);
+
+    // 13. Edge 5d: 5-wide north window protects all 5 south back-wall columns (12..16, 6, 18)
+    const edge5d = new VoxelWorld([28, 16, 28]);
+    for (let x = 10; x <= 18; x++) {
+      for (let z = 10; z <= 18; z++) {
+        edge5d.setVoxel(x, 4, z, "minecraft:stone_bricks", undefined, false, 1);
+        edge5d.setVoxel(x, 9, z, "minecraft:stone_bricks", undefined, false, 1);
+        if (x === 10 || x === 18 || z === 10 || z === 18) {
+          for (let y = 5; y <= 8; y++) {
+            if (z === 10 && x >= 12 && x <= 16 && (y === 6 || y === 7)) continue;
+            edge5d.setVoxel(x, y, z, "minecraft:oak_planks", undefined, false, 2);
+          }
+        }
+      }
+    }
+    const cutE5d = filterVoxelsForCutaway(edge5d.getAllVoxels(), 7, "NE");
+    for (let x = 12; x <= 16; x++) {
+      expect(hasVoxel(cutE5d, x, 6, 18)).toBe(true);
+    }
+    expect(hasVoxel(cutE5d, 11, 6, 10)).toBe(false);
+    expect(hasVoxel(cutE5d, 17, 6, 10)).toBe(false);
+    expect(hasVoxel(cutE5d, 18, 6, 14)).toBe(false);
+  });
 });

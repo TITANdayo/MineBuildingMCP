@@ -632,7 +632,13 @@ export class VoxelWorld {
    * doorway or window aperture in a wall (with vertical wall pillars on both sides and a lintel above).
    */
   private isWallAperture(x: number, y: number, z: number): boolean {
-    if (this.voxels.has(VoxelWorld.coordKey(x, y, z))) return false;
+    const self = this.voxels.get(VoxelWorld.coordKey(x, y, z));
+    if (
+      self &&
+      (isDoorBlockName(self.name) || !isPassableNonBlockingBlock(self.name))
+    ) {
+      return false;
+    }
 
     // Must have a non-terrain lintel/header block directly above within 1..4 blocks
     const hasLintelAt = (lx: number, ly: number, lz: number): boolean => {
@@ -654,7 +660,7 @@ export class VoxelWorld {
 
     // A true wall pillar at (wx, wy, wz) must be >= 2 blocks tall (solid at wy AND wy+1,
     // or at wy-1 when (x, wy-1, z) is open such as the upper level of a doorway).
-    // Never treat a 1-block-tall floor object sitting on a horizontal floor slab as a wall pillar.
+    // Never treat a 1-block-tall floor object or a *_fence + *_slab table as a wall pillar.
     const isWallPillarAt = (wx: number, wy: number, wz: number): boolean => {
       const v = this.voxels.get(VoxelWorld.coordKey(wx, wy, wz));
       if (!v || isInteriorFixtureBlock(v.name)) return false;
@@ -662,15 +668,18 @@ export class VoxelWorld {
       if (v.isTerrain && (!vDown || isInteriorFixtureBlock(vDown.name))) {
         return false;
       }
+      if (v.name.endsWith("_slab") && vDown?.name.endsWith("_fence")) {
+        return false;
+      }
       const vUp = this.voxels.get(VoxelWorld.coordKey(wx, wy + 1, wz));
       if (vUp && !isInteriorFixtureBlock(vUp.name)) {
-        if (v.name.endsWith("_fence") && vUp.name.endsWith("_slab")) {
-          let openSides = 0;
-          if (isOpenAt(wx + 1, wy, wz)) openSides++;
-          if (isOpenAt(wx - 1, wy, wz)) openSides++;
-          if (isOpenAt(wx, wy, wz + 1)) openSides++;
-          if (isOpenAt(wx, wy, wz - 1)) openSides++;
-          if (openSides >= 3) return false;
+        if (
+          v.name.endsWith("_fence") &&
+          vUp.name.endsWith("_slab") &&
+          !vDown?.name.endsWith("_fence") &&
+          !isOpenAt(x, wy - 1, z)
+        ) {
+          return false;
         }
         return true;
       }
