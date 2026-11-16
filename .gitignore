@@ -1,0 +1,6 @@
+node_modules/
+dist/
+samples/test_exported_windmill.nbt
+samples/mcp_tool_exported.nbt
+*.log
+.DS_Store
