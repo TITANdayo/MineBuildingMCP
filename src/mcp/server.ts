@@ -154,29 +154,29 @@ export class MineBuildingMcpServer {
     this.registerHandlers();
   }
 
-  private collectWorldTextures(): Record<string, string> {
-    const uniqueNames = new Set<string>();
-    for (const voxel of this.world.voxels.values()) {
-      uniqueNames.add(voxel.name);
-    }
-    const rawMap = this.assetLoader.getTexturesForBlocks(Array.from(uniqueNames));
-    const expanded: Record<string, string> = {};
-    for (const [shortName, dataUrl] of Object.entries(rawMap)) {
-      expanded[shortName] = dataUrl;
-      expanded[`minecraft:${shortName}`] = dataUrl;
-    }
-    return expanded;
+  private collectWorldAssets(): {
+    textures: Record<string, string>;
+    blockModels: Record<string, import("../types/shared.js").CompiledBlockDefinition>;
+  } {
+    const uniqueNames = Array.from(
+      new Set(Array.from(this.world.voxels.values(), (v) => v.name))
+    );
+    return {
+      textures: this.assetLoader.getTexturesForBlocks(uniqueNames),
+      blockModels: this.assetLoader.getBlockModelsForBlocks(uniqueNames),
+    };
   }
 
   private async syncCurrentWorldToViewer(): Promise<void> {
     const voxels = this.world.getAllVoxels();
     const traces = this.world.getTracesObject();
-    const textures = this.collectWorldTextures();
+    const { textures, blockModels } = this.collectWorldAssets();
     await this.wsBridge.syncWorld({
       voxels,
       size: [...this.world.size],
       traces,
       textures,
+      blockModels,
     });
   }
 
