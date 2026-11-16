@@ -97,9 +97,16 @@ export class WsBridge {
   private readonly requestTimeoutMs: number;
 
   constructor(options: WsBridgeOptions = {}) {
-    this.vitePort = options.vitePort ?? ( Number(process.env.CRAFTSTUDIO_VITE_PORT) || 5173 );
-    this.wsPort = options.wsPort ?? ( Number(process.env.CRAFTSTUDIO_WS_PORT) || 3001 );
-    this.headless = options.headless ?? process.env.CRAFTSTUDIO_HEADLESS !== "false";
+    this.vitePort =
+      options.vitePort ??
+      (Number(process.env.MINEBUILDING_VITE_PORT || process.env.CRAFTSTUDIO_VITE_PORT) || 5173);
+    this.wsPort =
+      options.wsPort ??
+      (Number(process.env.MINEBUILDING_WS_PORT || process.env.CRAFTSTUDIO_WS_PORT) || 3001);
+    this.headless =
+      options.headless ??
+      (process.env.MINEBUILDING_HEADLESS !== "false" &&
+        process.env.CRAFTSTUDIO_HEADLESS !== "false");
     this.requestTimeoutMs = options.requestTimeoutMs ?? 30_000;
   }
 
@@ -201,7 +208,7 @@ export class WsBridge {
         host: "127.0.0.1",
       },
       define: {
-        __CRAFTSTUDIO_WS_PORT__: JSON.stringify(this.wsPort),
+        __MINEBUILDING_WS_PORT__: JSON.stringify(this.wsPort),
       },
     });
 

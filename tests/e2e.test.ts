@@ -7,7 +7,7 @@ import { JarAssetLoader } from "../src/assets/jar-loader.js";
 import { WsBridge } from "../src/mcp/ws-bridge.js";
 import { PNG } from "pngjs";
 
-describe("CraftStudio MCP End-to-End Verification", () => {
+describe("MineBuildingMCP End-to-End Verification", () => {
   const sampleNbtPath = path.resolve(process.cwd(), "samples/sloped_river_terrain.nbt");
   const exportedNbtPath = path.resolve(process.cwd(), "samples/test_exported_windmill.nbt");
   let wsBridge: WsBridge;
@@ -170,9 +170,9 @@ describe("CraftStudio MCP End-to-End Verification", () => {
   }, 45000);
 
   it("5. Full MCP Server tool flow: load_terrain -> run_build_script -> inspect_pixel (verifying Y-axis flip & line trace) -> export_structure", async () => {
-    const { CraftStudioMcpServer } = await import("../src/mcp/server.js");
-    // Reuse a dedicated CraftStudioMcpServer instance on an ephemeral WS port
-    const mcpServer = new CraftStudioMcpServer({ wsPort: 0, vitePort: 0 });
+    const { MineBuildingMcpServer } = await import("../src/mcp/server.js");
+    // Reuse a dedicated MineBuildingMcpServer instance on an ephemeral WS port
+    const mcpServer = new MineBuildingMcpServer({ wsPort: 0, vitePort: 0 });
     await mcpServer.wsBridge.start();
 
     try {

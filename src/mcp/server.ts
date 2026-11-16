@@ -74,7 +74,7 @@ function formatBuildReport(
   viewerUrl: string
 ): string {
   const lines: string[] = [];
-  lines.push("=== CraftStudio Build Execution Report ===");
+  lines.push("=== MineBuildingMCP Build Execution Report ===");
   lines.push(
     `World Size: ${world.size[0]}x${world.size[1]}x${world.size[2]} | Total Voxels: ${world.voxels.size} | Build Voxels Placed: ${evaluation.totalBuildBlocks} | DSL Operations: ${opCount}`
   );
@@ -128,7 +128,7 @@ function formatBuildReport(
   return lines.join("\n");
 }
 
-export class CraftStudioMcpServer {
+export class MineBuildingMcpServer {
   public readonly server: Server;
   public readonly wsBridge: WsBridge;
   public readonly assetLoader: JarAssetLoader;
@@ -141,7 +141,7 @@ export class CraftStudioMcpServer {
 
     this.server = new Server(
       {
-        name: "craftstudio-mcp",
+        name: "MineBuildingMCP",
         version: "1.0.0",
       },
       {
@@ -504,7 +504,7 @@ export class CraftStudioMcpServer {
         }
       } catch (err) {
         const message = err instanceof Error ? err.stack ?? err.message : String(err);
-        process.stderr.write(`[CraftStudioMCP] Tool "${name}" error: ${message}\n`);
+        process.stderr.write(`[MineBuildingMCP] Tool "${name}" error: ${message}\n`);
         return {
           isError: true,
           content: [
@@ -523,7 +523,7 @@ export class CraftStudioMcpServer {
     await this.wsBridge.start();
     const transport = new StdioServerTransport();
     await this.server.connect(transport);
-    process.stderr.write("[CraftStudioMCP] MCP Server connected via stdio transport\n");
+    process.stderr.write("[MineBuildingMCP] MCP Server connected via stdio transport\n");
   }
 
   public async close(): Promise<void> {
@@ -532,8 +532,10 @@ export class CraftStudioMcpServer {
   }
 }
 
-export async function startMcpServer(): Promise<CraftStudioMcpServer> {
-  const mcpServer = new CraftStudioMcpServer();
+export { MineBuildingMcpServer as CraftStudioMcpServer };
+
+export async function startMcpServer(): Promise<MineBuildingMcpServer> {
+  const mcpServer = new MineBuildingMcpServer();
   await mcpServer.startStdio();
 
   const cleanup = async () => {
@@ -565,7 +567,7 @@ const isMain = (() => {
 
 if (isMain) {
   startMcpServer().catch((err) => {
-    process.stderr.write(`[CraftStudioMCP] Fatal startup error: ${String(err)}\n`);
+    process.stderr.write(`[MineBuildingMCP] Fatal startup error: ${String(err)}\n`);
     process.exit(1);
   });
 }

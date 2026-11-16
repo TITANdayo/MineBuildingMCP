@@ -1,4 +1,4 @@
-# CraftStudio MCP (MineBuildingMCP)
+# MineBuildingMCP
 
 AI特化型の軽量マインクラフト建築エディタ＆MCPサーバー。
 Blender等の外部ソフトを使わず、Java版ストラクチャーブロック（`.nbt`）の入出力、ローカルのMinecraft（`.jar`）からのアセット自動抽出（未インストール環境向けの決定論的16x16ピクセルアート生成フォールバック付き）、Three.jsによる4方向（`NE`, `SE`, `SW`, `NW`）レンダリング、および**画像上の `(u, v)` ピクセル指定から3D座標と生成元コードの行番号を1ミリ秒以下で逆引きするオフスクリーンIDバッファ**を備えています。
@@ -8,7 +8,7 @@ Blender等の外部ソフトを使わず、Java版ストラクチャーブロッ
 ## ディレクトリ構成
 
 ```text
-craftstudio-mcp/
+MineBuildingMCP/
 ├── package.json
 ├── tsconfig.json
 ├── vite.config.ts
@@ -53,7 +53,7 @@ npm run generate-sample
 ```json
 {
   "mcpServers": {
-    "craftstudio-mcp": {
+    "MineBuildingMCP": {
       "command": "npx",
       "args": ["tsx", "/path/to/MineBuildingMCP/src/mcp/server.ts"],
       "env": {

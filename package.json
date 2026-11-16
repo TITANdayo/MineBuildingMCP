@@ -1,10 +1,10 @@
 {
-  "name": "craftstudio-mcp",
+  "name": "mine-building-mcp",
   "version": "1.0.0",
-  "description": "AI-specialized lightweight Minecraft building editor & MCP server with Three.js 4-view offscreen ID picker",
+  "description": "MineBuildingMCP: AI-specialized lightweight Minecraft building editor & MCP server with Three.js 4-view offscreen ID picker",
   "type": "module",
   "bin": {
-    "craftstudio-mcp": "./dist/mcp/server.js"
+    "mine-building-mcp": "./dist/mcp/server.js"
   },
   "scripts": {
     "dev": "vite",

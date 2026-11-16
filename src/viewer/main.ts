@@ -13,7 +13,7 @@ import { OffscreenPickerPass } from "./picker-pass.js";
 
 const VIEW_DIRECTIONS: ViewDirection[] = ["NE", "SE", "SW", "NW"];
 
-class CraftStudioViewer {
+class MineBuildingViewer {
   private container: HTMLElement;
   private renderer: THREE.WebGLRenderer;
   private scene: THREE.Scene;
@@ -565,7 +565,7 @@ class CraftStudioViewer {
           const req = JSON.parse(String(event.data)) as WsRequest;
           await this.handleWsRequest(req);
         } catch (err) {
-          console.error("[CraftStudioViewer] Failed to handle WS message:", err);
+          console.error("[MineBuildingViewer] Failed to handle WS message:", err);
         }
       });
 
@@ -633,8 +633,8 @@ class CraftStudioViewer {
 
 declare global {
   interface Window {
-    __craftStudioViewer?: CraftStudioViewer;
+    __mineBuildingViewer?: MineBuildingViewer;
   }
 }
 
-window.__craftStudioViewer = new CraftStudioViewer();
+window.__mineBuildingViewer = new MineBuildingViewer();
