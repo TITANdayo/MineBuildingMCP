@@ -1,0 +1,2 @@
+# MineBuildingMCP
+Minecraftの地形にあった建築物をAIが視覚的にフィードバックしながら建てられるツール
