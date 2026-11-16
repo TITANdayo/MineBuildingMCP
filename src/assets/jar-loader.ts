@@ -701,7 +701,7 @@ export class JarAssetLoader {
     }
   }
 
-  private init(candidatePath: string | null): void {
+  public init(candidatePath: string | null): void {
     this.initialized = true;
     this.jarPath = null;
     this.zip = null;
@@ -711,6 +711,7 @@ export class JarAssetLoader {
     this.modelJsonCache.clear();
     this.blockstateJsonCache.clear();
     this.resolvedModelCache.clear();
+    this.textureAssetCache.clear();
     this.blockDefCache.clear();
 
     if (!candidatePath || !fs.existsSync(candidatePath)) {
