@@ -1,5 +1,61 @@
 export type BlockState = Record<string, string>; // 例: { facing: "north", half: "bottom" }
 
+export type McFaceDirection = "down" | "up" | "north" | "south" | "west" | "east";
+
+export interface ResolvedModelFace {
+  textureKey: string;
+  uv?: [number, number, number, number];
+  rotation?: number;
+  cullface?: McFaceDirection;
+  tintindex?: number;
+}
+
+export interface ResolvedModelElementRotation {
+  origin: [number, number, number];
+  axis?: "x" | "y" | "z";
+  angle?: number;
+  x?: number;
+  y?: number;
+  z?: number;
+  rescale?: boolean;
+}
+
+export interface ResolvedModelElement {
+  from: [number, number, number];
+  to: [number, number, number];
+  rotation?: ResolvedModelElementRotation;
+  shade?: boolean;
+  faces: Partial<Record<McFaceDirection, ResolvedModelFace>>;
+}
+
+export interface AppliedModelRef {
+  model: string;
+  x?: number;
+  y?: number;
+  uvlock?: boolean;
+}
+
+export interface MultipartCondition {
+  OR?: MultipartCondition[];
+  AND?: MultipartCondition[];
+  [prop: string]: string | boolean | MultipartCondition[] | undefined;
+}
+
+export interface MultipartCase {
+  when?: MultipartCondition;
+  apply: AppliedModelRef[];
+}
+
+export interface CompiledBlockDefinition {
+  blockName: string;
+  variants?: Record<string, AppliedModelRef[]>;
+  multipart?: MultipartCase[];
+  models: Record<string, ResolvedModelElement[]>;
+  isFullOpaqueCube: boolean;
+  isFluid: boolean;
+  isTranslucent: boolean;
+}
+
 export interface VoxelData {
   x: number;
   y: number;
@@ -75,7 +131,8 @@ export type WsRequest =
       voxels: VoxelData[];
       size: [number, number, number];
       traces?: Record<number, TraceRecord>;
-      textures?: Record<string, string>; // blockName -> data:image/png;base64,...
+      textures?: Record<string, string>; // textureKey -> data:image/png;base64,...
+      blockModels?: Record<string, CompiledBlockDefinition>;
     }
   | { type: "RENDER_VIEWS"; id: string; resolution: number }
   | { type: "INSPECT_PIXEL"; id: string; view: ViewDirection; u: number; v: number };

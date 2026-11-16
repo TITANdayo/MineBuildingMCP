@@ -3,12 +3,33 @@ import path from "node:path";
 import os from "node:os";
 import AdmZip from "adm-zip";
 import { PNG } from "pngjs";
+import type {
+  AppliedModelRef,
+  CompiledBlockDefinition,
+  McFaceDirection,
+  MultipartCase,
+  MultipartCondition,
+  ResolvedModelElement,
+  ResolvedModelElementRotation,
+  ResolvedModelFace,
+} from "../types/shared.js";
 
 const BLOCK_TEXTURE_PREFIX = "assets/minecraft/textures/block/";
+const BLOCK_MODEL_PREFIX = "assets/minecraft/models/block/";
+const BLOCKSTATE_PREFIX = "assets/minecraft/blockstates/";
+
+const ALL_FACE_DIRECTIONS: McFaceDirection[] = [
+  "down",
+  "up",
+  "north",
+  "south",
+  "west",
+  "east",
+];
 
 /**
  * Strips "minecraft:" namespace and block state brackets `[...]` if present,
- * returning a clean lowercase block identifier (e.g., "oak_stairs").
+ * returning a clean lowercase identifier (e.g., "oak_stairs").
  */
 export function normalizeBlockName(blockName: string): string {
   let clean = blockName.trim().toLowerCase();
@@ -22,138 +43,21 @@ export function normalizeBlockName(blockName: string): string {
   return clean;
 }
 
-/**
- * Explicit alias map from normalized block names to candidate PNG filenames
- * inside `assets/minecraft/textures/block/` (without `.png` extension).
- */
-const EXPLICIT_TEXTURE_MAP: Record<string, string[]> = {
-  // Wood stairs, slabs, fences, gates
-  oak_stairs: ["oak_planks"],
-  oak_slab: ["oak_planks"],
-  oak_fence: ["oak_planks"],
-  oak_fence_gate: ["oak_planks"],
-  spruce_stairs: ["spruce_planks"],
-  spruce_slab: ["spruce_planks"],
-  spruce_fence: ["spruce_planks"],
-  spruce_fence_gate: ["spruce_planks"],
-  birch_stairs: ["birch_planks"],
-  birch_slab: ["birch_planks"],
-  birch_fence: ["birch_planks"],
-  birch_fence_gate: ["birch_planks"],
-  jungle_stairs: ["jungle_planks"],
-  jungle_slab: ["jungle_planks"],
-  jungle_fence: ["jungle_planks"],
-  jungle_fence_gate: ["jungle_planks"],
-  acacia_stairs: ["acacia_planks"],
-  acacia_slab: ["acacia_planks"],
-  acacia_fence: ["acacia_planks"],
-  acacia_fence_gate: ["acacia_planks"],
-  dark_oak_stairs: ["dark_oak_planks"],
-  dark_oak_slab: ["dark_oak_planks"],
-  dark_oak_fence: ["dark_oak_planks"],
-  dark_oak_fence_gate: ["dark_oak_planks"],
-  mangrove_stairs: ["mangrove_planks"],
-  mangrove_slab: ["mangrove_planks"],
-  mangrove_fence: ["mangrove_planks"],
-  mangrove_fence_gate: ["mangrove_planks"],
-  cherry_stairs: ["cherry_planks"],
-  cherry_slab: ["cherry_planks"],
-  cherry_fence: ["cherry_planks"],
-  cherry_fence_gate: ["cherry_planks"],
-  bamboo_stairs: ["bamboo_planks"],
-  bamboo_slab: ["bamboo_planks"],
-  bamboo_fence: ["bamboo_planks"],
-  bamboo_fence_gate: ["bamboo_planks"],
-  crimson_stairs: ["crimson_planks"],
-  crimson_slab: ["crimson_planks"],
-  crimson_fence: ["crimson_planks"],
-  crimson_fence_gate: ["crimson_planks"],
-  warped_stairs: ["warped_planks"],
-  warped_slab: ["warped_planks"],
-  warped_fence: ["warped_planks"],
-  warped_fence_gate: ["warped_planks"],
+function normalizeModelRefName(modelRef: string): string {
+  return modelRef
+    .trim()
+    .toLowerCase()
+    .replace(/^minecraft:/, "")
+    .replace(/^block\//, "");
+}
 
-  // Stone & brick variants
-  stone_brick_stairs: ["stone_bricks"],
-  stone_brick_slab: ["stone_bricks"],
-  stone_brick_wall: ["stone_bricks"],
-  mossy_stone_brick_stairs: ["mossy_stone_bricks"],
-  mossy_stone_brick_slab: ["mossy_stone_bricks"],
-  mossy_stone_brick_wall: ["mossy_stone_bricks"],
-  cobblestone_stairs: ["cobblestone"],
-  cobblestone_slab: ["cobblestone"],
-  cobblestone_wall: ["cobblestone"],
-  mossy_cobblestone_stairs: ["mossy_cobblestone"],
-  mossy_cobblestone_slab: ["mossy_cobblestone"],
-  mossy_cobblestone_wall: ["mossy_cobblestone"],
-  stone_stairs: ["stone"],
-  stone_slab: ["stone"],
-  smooth_stone_slab: ["smooth_stone"],
-  andesite_stairs: ["andesite"],
-  andesite_slab: ["andesite"],
-  andesite_wall: ["andesite"],
-  polished_andesite_stairs: ["polished_andesite"],
-  polished_andesite_slab: ["polished_andesite"],
-  diorite_stairs: ["diorite"],
-  diorite_slab: ["diorite"],
-  diorite_wall: ["diorite"],
-  polished_diorite_stairs: ["polished_diorite"],
-  polished_diorite_slab: ["polished_diorite"],
-  granite_stairs: ["granite"],
-  granite_slab: ["granite"],
-  granite_wall: ["granite"],
-  polished_granite_stairs: ["polished_granite"],
-  polished_granite_slab: ["polished_granite"],
-  brick_stairs: ["bricks"],
-  brick_slab: ["bricks"],
-  brick_wall: ["bricks"],
-  mud_brick_stairs: ["mud_bricks"],
-  mud_brick_slab: ["mud_bricks"],
-  mud_brick_wall: ["mud_bricks"],
-  deepslate_brick_stairs: ["deepslate_bricks"],
-  deepslate_brick_slab: ["deepslate_bricks"],
-  deepslate_brick_wall: ["deepslate_bricks"],
-  deepslate_tile_stairs: ["deepslate_tiles"],
-  deepslate_tile_slab: ["deepslate_tiles"],
-  deepslate_tile_wall: ["deepslate_tiles"],
-  cobbled_deepslate_stairs: ["cobbled_deepslate"],
-  cobbled_deepslate_slab: ["cobbled_deepslate"],
-  cobbled_deepslate_wall: ["cobbled_deepslate"],
-  sandstone_stairs: ["sandstone", "sandstone_top", "sandstone_side"],
-  sandstone_slab: ["sandstone", "sandstone_top", "sandstone_side"],
-  sandstone_wall: ["sandstone", "sandstone_top", "sandstone_side"],
-  red_sandstone_stairs: ["red_sandstone", "red_sandstone_top", "red_sandstone_side"],
-  red_sandstone_slab: ["red_sandstone", "red_sandstone_top", "red_sandstone_side"],
-  red_sandstone_wall: ["red_sandstone", "red_sandstone_top", "red_sandstone_side"],
-  quartz_stairs: ["quartz_block_side", "quartz_block_top"],
-  quartz_slab: ["quartz_block_side", "quartz_block_top"],
-  quartz_block: ["quartz_block_side", "quartz_block_top"],
-  smooth_quartz: ["quartz_block_bottom", "quartz_block_top"],
-  smooth_quartz_stairs: ["quartz_block_bottom", "quartz_block_top"],
-  smooth_quartz_slab: ["quartz_block_bottom", "quartz_block_top"],
-
-  // Natural / multi-face blocks & fluids
-  grass_block: ["grass_block_side", "grass_block_top"],
-  dirt_path: ["dirt_path_top", "dirt_path_side", "grass_path_top", "grass_path_side"],
-  grass_path: ["grass_path_top", "dirt_path_top"],
-  podzol: ["podzol_top", "podzol_side"],
-  mycelium: ["mycelium_top", "mycelium_side"],
-  snow_block: ["snow"],
-  snow: ["snow"],
-  water: ["water_still", "water_flow"],
-  flowing_water: ["water_flow", "water_still"],
-  lava: ["lava_still", "lava_flow"],
-  flowing_lava: ["lava_flow", "lava_still"],
-  glass_pane: ["glass"],
-  iron_bars: ["iron_bars"],
-  oak_door: ["oak_door_top", "oak_door_bottom", "oak_planks"],
-  spruce_door: ["spruce_door_top", "spruce_door_bottom", "spruce_planks"],
-  birch_door: ["birch_door_top", "birch_door_bottom", "birch_planks"],
-  dark_oak_door: ["dark_oak_door_top", "dark_oak_door_bottom", "dark_oak_planks"],
-  torch: ["torch"],
-  wall_torch: ["torch"],
-  lantern: ["lantern"],
-};
+function normalizeTextureRefName(texRef: string): string {
+  return texRef
+    .trim()
+    .toLowerCase()
+    .replace(/^minecraft:/, "")
+    .replace(/^block\//, "");
+}
 
 /**
  * Compares two version strings or file paths so that standard release versions
@@ -161,16 +65,13 @@ const EXPLICIT_TEXTURE_MAP: Record<string, string[]> = {
  */
 function parseVersionScore(filePath: string, mtimeMs: number): number {
   const base = path.basename(filePath, ".jar");
-  // Match standard semantic release versions like 1.21.4 or 1.20
   const semverMatch = /^(\d+)\.(\d+)(?:\.(\d+))?$/.exec(base);
   if (semverMatch) {
     const major = parseInt(semverMatch[1], 10);
     const minor = parseInt(semverMatch[2], 10);
     const patch = semverMatch[3] ? parseInt(semverMatch[3], 10) : 0;
-    // High base score for clean release versions
     return 1_000_000_000_000 + major * 100_000_000 + minor * 1_000_000 + patch * 10_000;
   }
-  // Pre-releases or modded versions starting with x.y.z
   const prefixMatch = /^(\d+)\.(\d+)(?:\.(\d+))?/.exec(base);
   if (prefixMatch) {
     const major = parseInt(prefixMatch[1], 10);
@@ -178,7 +79,6 @@ function parseVersionScore(filePath: string, mtimeMs: number): number {
     const patch = prefixMatch[3] ? parseInt(prefixMatch[3], 10) : 0;
     return 500_000_000_000 + major * 100_000_000 + minor * 1_000_000 + patch * 10_000;
   }
-  // Fallback to modification timestamp
   return mtimeMs;
 }
 
@@ -252,11 +152,8 @@ export function detectMinecraftJarPath(): string | null {
   const appData = process.env.APPDATA || path.join(home, "AppData", "Roaming");
 
   const candidateDirs = [
-    // Windows
     path.join(appData, ".minecraft", "versions"),
-    // macOS
     path.join(home, "Library", "Application Support", "minecraft", "versions"),
-    // Linux standard & Flatpak
     path.join(home, ".minecraft", "versions"),
     path.join(home, ".var", "app", "com.mojang.Minecraft", ".minecraft", "versions"),
   ];
@@ -273,70 +170,6 @@ export function detectMinecraftJarPath(): string | null {
 
   allJars.sort((a, b) => b.score - a.score);
   return allJars[0].jarPath;
-}
-
-/**
- * Generates candidate texture base names (without `.png`) for a normalized block name.
- */
-export function getTextureCandidates(normalizedBlock: string): string[] {
-  const candidates = new Set<string>();
-
-  // 1. Explicit mapping
-  const explicit = EXPLICIT_TEXTURE_MAP[normalizedBlock];
-  if (explicit) {
-    for (const item of explicit) {
-      candidates.add(item);
-    }
-  }
-
-  // 2. Direct match
-  candidates.add(normalizedBlock);
-
-  // 3. Generic suffix stripping & transformations
-  const suffixes = [
-    "_stairs",
-    "_slab",
-    "_wall",
-    "_fence_gate",
-    "_fence",
-    "_pressure_plate",
-    "_button",
-    "_trapdoor",
-    "_door",
-    "_pane",
-    "_wood",
-    "_hyphae",
-  ];
-
-  for (const suffix of suffixes) {
-    if (normalizedBlock.endsWith(suffix)) {
-      const stem = normalizedBlock.slice(0, -suffix.length);
-      candidates.add(stem);
-      candidates.add(`${stem}_planks`);
-      candidates.add(`${stem}s`);
-      candidates.add(`${stem}_block`);
-      candidates.add(`${stem}_log`);
-      candidates.add(`${stem}_top`);
-      candidates.add(`${stem}_side`);
-    }
-  }
-
-  // 4. Multi-face block conventions (`_top`, `_side`, `_front`, `_still`)
-  candidates.add(`${normalizedBlock}_side`);
-  candidates.add(`${normalizedBlock}_top`);
-  candidates.add(`${normalizedBlock}_front`);
-  candidates.add(`${normalizedBlock}_still`);
-  candidates.add(`${normalizedBlock}_planks`);
-  candidates.add(`${normalizedBlock}s`);
-
-  if (normalizedBlock.endsWith("_block")) {
-    const stem = normalizedBlock.slice(0, -"_block".length);
-    candidates.add(stem);
-    candidates.add(`${stem}_top`);
-    candidates.add(`${stem}_side`);
-  }
-
-  return Array.from(candidates);
 }
 
 /**
@@ -411,7 +244,6 @@ interface ProceduralStyle {
 }
 
 function resolveProceduralStyle(block: string, seed: number): ProceduralStyle {
-  // 1. Grass / moss
   if (block.includes("grass") || block.includes("moss") || block.includes(" turf")) {
     return {
       baseRgb: [94, 168, 58],
@@ -421,7 +253,6 @@ function resolveProceduralStyle(block: string, seed: number): ProceduralStyle {
     };
   }
 
-  // 2. Leaves / foliage
   if (block.includes("leaves") || block.includes("vine") || block.includes("bush")) {
     const isCherry = block.includes("cherry");
     return {
@@ -432,7 +263,6 @@ function resolveProceduralStyle(block: string, seed: number): ProceduralStyle {
     };
   }
 
-  // 3. Dirt / mud / podzol / coarse_dirt / farmland / path
   if (
     block.includes("dirt") ||
     block.includes("mud") ||
@@ -450,7 +280,6 @@ function resolveProceduralStyle(block: string, seed: number): ProceduralStyle {
     };
   }
 
-  // 4. Water / ice
   if (block.includes("water") || block.includes("ice")) {
     const isIce = block.includes("ice");
     return {
@@ -461,7 +290,6 @@ function resolveProceduralStyle(block: string, seed: number): ProceduralStyle {
     };
   }
 
-  // 5. Glass
   if (block.includes("glass")) {
     return {
       baseRgb: [200, 240, 248],
@@ -471,7 +299,6 @@ function resolveProceduralStyle(block: string, seed: number): ProceduralStyle {
     };
   }
 
-  // 6. Sand / sandstone
   if (block.includes("sand")) {
     const isRed = block.includes("red_sand");
     return {
@@ -482,7 +309,6 @@ function resolveProceduralStyle(block: string, seed: number): ProceduralStyle {
     };
   }
 
-  // 7. Wood logs / stems
   if (block.includes("_log") || block.includes("_wood") || block.includes("_stem")) {
     if (block.includes("birch")) {
       return { baseRgb: [216, 210, 198], accentRgb: [90, 85, 78], alpha: 255, pattern: "log" };
@@ -496,7 +322,6 @@ function resolveProceduralStyle(block: string, seed: number): ProceduralStyle {
     return { baseRgb: [108, 82, 50], accentRgb: [78, 58, 34], alpha: 255, pattern: "log" };
   }
 
-  // 8. Wood planks / stairs / slabs / fences / doors / trapdoors
   if (
     block.includes("oak") ||
     block.includes("spruce") ||
@@ -534,11 +359,9 @@ function resolveProceduralStyle(block: string, seed: number): ProceduralStyle {
     if (block.includes("bamboo")) {
       return { baseRgb: [198, 178, 86], accentRgb: [170, 150, 66], alpha: 255, pattern: "planks" };
     }
-    // Default oak / medium warm wood
     return { baseRgb: [162, 130, 78], accentRgb: [134, 104, 58], alpha: 255, pattern: "planks" };
   }
 
-  // 9. Red brick / terracotta / copper / roof tiles
   if (
     (block.includes("brick") && !block.includes("stone") && !block.includes("deepslate") && !block.includes("mud")) ||
     block.includes("terracotta") ||
@@ -547,13 +370,12 @@ function resolveProceduralStyle(block: string, seed: number): ProceduralStyle {
   ) {
     return {
       baseRgb: [156, 78, 62],
-      accentRgb: [188, 172, 158], // mortar / highlight
+      accentRgb: [188, 172, 158],
       alpha: 255,
       pattern: "brick",
     };
   }
 
-  // 10. Stone / cobblestone / andesite / diorite / stone_bricks / deepslate
   if (
     block.includes("stone") ||
     block.includes("cobble") ||
@@ -596,7 +418,6 @@ function resolveProceduralStyle(block: string, seed: number): ProceduralStyle {
     };
   }
 
-  // 11. Quartz / snow / white blocks
   if (block.includes("quartz") || block.includes("snow") || block.includes("white") || block.includes("calcite")) {
     return {
       baseRgb: [236, 234, 228],
@@ -606,10 +427,9 @@ function resolveProceduralStyle(block: string, seed: number): ProceduralStyle {
     };
   }
 
-  // 12. Deterministic HSV fallback for any unknown block
   const hue = seed % 360;
-  const sat = 0.45 + ((seed >>> 8) % 30) / 100; // 0.45 - 0.74
-  const val = 0.55 + ((seed >>> 16) % 28) / 100; // 0.55 - 0.82
+  const sat = 0.45 + ((seed >>> 8) % 30) / 100;
+  const val = 0.55 + ((seed >>> 16) % 28) / 100;
   const baseRgb = hsvToRgb(hue, sat, val);
   const accentRgb = hsvToRgb(hue, Math.min(1, sat + 0.1), Math.max(0.2, val - 0.18));
 
@@ -623,10 +443,10 @@ function resolveProceduralStyle(block: string, seed: number): ProceduralStyle {
 
 /**
  * Deterministically generates a crisp 16x16 pixel-art PNG Data URL (`data:image/png;base64,...`)
- * for a given block name using `pngjs`.
+ * for a given block/texture name when no `.jar` asset is available.
  */
 export function generateProceduralBlockPngDataUrl(blockName: string): string {
-  const normalized = normalizeBlockName(blockName);
+  const normalized = normalizeBlockName(blockName.replace(/#tinted$/, ""));
   const seed = hashString(normalized);
   const rng = createRng(seed);
   const style = resolveProceduralStyle(normalized, seed);
@@ -644,7 +464,6 @@ export function generateProceduralBlockPngDataUrl(blockName: string): string {
 
       switch (style.pattern) {
         case "grass": {
-          // speckles and blade ticks
           if ((x + y * 3 + Math.floor(rng() * 5)) % 5 === 0) {
             [r, g, b] = style.accentRgb;
           }
@@ -656,7 +475,6 @@ export function generateProceduralBlockPngDataUrl(blockName: string): string {
           break;
         }
         case "leaves": {
-          // Checkerboard foliage texture
           if ((x + y) % 2 === 0 || rng() < 0.25) {
             [r, g, b] = style.accentRgb;
           }
@@ -683,7 +501,6 @@ export function generateProceduralBlockPngDataUrl(blockName: string): string {
           break;
         }
         case "planks": {
-          // Horizontal plank seams every 4 pixels + staggered vertical joints
           const isHorizontalSeam = y % 4 === 0;
           const row = Math.floor(y / 4);
           const jointX = (row * 7 + 3) % 16;
@@ -698,14 +515,12 @@ export function generateProceduralBlockPngDataUrl(blockName: string): string {
           break;
         }
         case "log": {
-          // Vertical bark stripes
           if (x % 3 === 0 || isOuterBorder) {
             [r, g, b] = style.accentRgb;
           }
           break;
         }
         case "brick": {
-          // Classic staggered brick mortar lines
           const isMortarY = y % 4 === 0;
           const brickRow = Math.floor(y / 4);
           const isMortarX = (x + (brickRow % 2) * 4) % 8 === 0;
@@ -719,7 +534,6 @@ export function generateProceduralBlockPngDataUrl(blockName: string): string {
           break;
         }
         case "cobble": {
-          // Cellular cobble grid lines
           const cellEdge =
             (x % 4 === 0 && y % 2 === 0) ||
             (y % 4 === 0 && x % 2 === 1) ||
@@ -730,8 +544,7 @@ export function generateProceduralBlockPngDataUrl(blockName: string): string {
           break;
         }
         case "water": {
-          // Wavy horizontal highlights
-          const wave = (y % 4 === 1 && (x + Math.floor(y / 4) * 2) % 4 < 2);
+          const wave = y % 4 === 1 && (x + Math.floor(y / 4) * 2) % 4 < 2;
           if (wave) {
             [r, g, b] = style.accentRgb;
           }
@@ -743,7 +556,6 @@ export function generateProceduralBlockPngDataUrl(blockName: string): string {
           break;
         }
         case "glass": {
-          // Crisp frame with light diagonal streak and clear interior
           const isStreak = (x + y === 5 || x + y === 6) && x >= 2 && y >= 2;
           const isInnerRim = x === 1 || y === 1 || x === 14 || y === 14;
           if (isOuterBorder) {
@@ -759,7 +571,6 @@ export function generateProceduralBlockPngDataUrl(blockName: string): string {
           break;
         }
         case "sand": {
-          // Subtle ripple speckles
           if ((x + y * 2) % 6 === 0 || rng() < 0.2) {
             [r, g, b] = style.accentRgb;
           }
@@ -771,7 +582,6 @@ export function generateProceduralBlockPngDataUrl(blockName: string): string {
           break;
         }
         default: {
-          // Generic distinct voxel grid border + subtle inner highlight
           if (isOuterBorder) {
             [r, g, b] = style.accentRgb;
           } else if (x === 1 || y === 1) {
@@ -804,11 +614,79 @@ export function generateProceduralBlockPngDataUrl(blockName: string): string {
   return `data:image/png;base64,${buffer.toString("base64")}`;
 }
 
+interface RawFaceJson {
+  uv?: [number, number, number, number];
+  texture: string;
+  cullface?: string;
+  rotation?: number;
+  tintindex?: number;
+}
+
+interface RawElementJson {
+  from: [number, number, number];
+  to: [number, number, number];
+  rotation?: {
+    origin: [number, number, number];
+    axis?: "x" | "y" | "z";
+    angle?: number;
+    x?: number;
+    y?: number;
+    z?: number;
+    rescale?: boolean;
+  };
+  shade?: boolean;
+  faces: Record<string, RawFaceJson>;
+}
+
+interface RawBlockModelJson {
+  parent?: string;
+  textures?: Record<string, string>;
+  elements?: RawElementJson[];
+}
+
+interface RawAppliedRefJson {
+  model: string;
+  x?: number;
+  y?: number;
+  uvlock?: boolean;
+  weight?: number;
+}
+
+interface RawBlockstateJson {
+  variants?: Record<string, RawAppliedRefJson | RawAppliedRefJson[]>;
+  multipart?: Array<{
+    when?: MultipartCondition;
+    apply: RawAppliedRefJson | RawAppliedRefJson[];
+  }>;
+}
+
+interface ResolvedTextureAsset {
+  dataUrl: string;
+  hasTranslucentAlpha: boolean;
+  isOpaque: boolean;
+}
+
+interface ResolvedModelInfo {
+  elements: ResolvedModelElement[];
+  isFluid: boolean;
+  primaryTextureKey: string | null;
+}
+
+const DEFAULT_GRASS_FOLIAGE_TINT: [number, number, number] = [121, 192, 90];
+const DEFAULT_WATER_TINT: [number, number, number] = [48, 115, 255];
+
 export class JarAssetLoader {
   private jarPath: string | null = null;
   private zip: AdmZip | null = null;
-  private entrySet: Set<string> = new Set();
-  private textureCache: Map<string, string> = new Map();
+  private jarTextureEntries: Map<string, AdmZip.IZipEntry> = new Map();
+  private jarBlockstateEntries: Map<string, AdmZip.IZipEntry> = new Map();
+  private jarModelEntries: Map<string, AdmZip.IZipEntry> = new Map();
+
+  private modelJsonCache: Map<string, RawBlockModelJson | null> = new Map();
+  private blockstateJsonCache: Map<string, RawBlockstateJson | null> = new Map();
+  private resolvedModelCache: Map<string, ResolvedModelInfo> = new Map();
+  private textureAssetCache: Map<string, ResolvedTextureAsset> = new Map();
+  private blockDefCache: Map<string, CompiledBlockDefinition> = new Map();
   private initialized = false;
 
   constructor(customJarPath?: string) {
@@ -827,7 +705,13 @@ export class JarAssetLoader {
     this.initialized = true;
     this.jarPath = null;
     this.zip = null;
-    this.entrySet.clear();
+    this.jarTextureEntries.clear();
+    this.jarBlockstateEntries.clear();
+    this.jarModelEntries.clear();
+    this.modelJsonCache.clear();
+    this.blockstateJsonCache.clear();
+    this.resolvedModelCache.clear();
+    this.blockDefCache.clear();
 
     if (!candidatePath || !fs.existsSync(candidatePath)) {
       return;
@@ -837,12 +721,17 @@ export class JarAssetLoader {
       const zip = new AdmZip(candidatePath);
       const entries = zip.getEntries();
       for (const entry of entries) {
-        if (
-          !entry.isDirectory &&
-          entry.entryName.startsWith(BLOCK_TEXTURE_PREFIX) &&
-          entry.entryName.endsWith(".png")
-        ) {
-          this.entrySet.add(entry.entryName);
+        if (entry.isDirectory) continue;
+        const name = entry.entryName;
+        if (name.startsWith(BLOCK_TEXTURE_PREFIX) && name.endsWith(".png")) {
+          const shortKey = name.slice(BLOCK_TEXTURE_PREFIX.length, -".png".length);
+          this.jarTextureEntries.set(shortKey, entry);
+        } else if (name.startsWith(BLOCKSTATE_PREFIX) && name.endsWith(".json")) {
+          const shortKey = name.slice(BLOCKSTATE_PREFIX.length, -".json".length);
+          this.jarBlockstateEntries.set(shortKey, entry);
+        } else if (name.startsWith(BLOCK_MODEL_PREFIX) && name.endsWith(".json")) {
+          const shortKey = name.slice(BLOCK_MODEL_PREFIX.length, -".json".length);
+          this.jarModelEntries.set(shortKey, entry);
         }
       }
       this.zip = zip;
@@ -850,7 +739,9 @@ export class JarAssetLoader {
     } catch {
       this.zip = null;
       this.jarPath = null;
-      this.entrySet.clear();
+      this.jarTextureEntries.clear();
+      this.jarBlockstateEntries.clear();
+      this.jarModelEntries.clear();
     }
   }
 
@@ -862,62 +753,599 @@ export class JarAssetLoader {
     return this.jarPath;
   }
 
-  /**
-   * Resolves a block name to a `data:image/png;base64,...` texture URL.
-   * Extracts from the local Minecraft `.jar` when available, or falls back to
-   * a deterministic 16x16 procedural PNG generated via `pngjs`.
-   */
-  public getBlockTextureDataUrl(blockName: string): string {
-    this.ensureInitialized();
-    const normalized = normalizeBlockName(blockName);
+  private loadRawBlockstateJson(blockName: string): RawBlockstateJson | null {
+    const clean = normalizeBlockName(blockName);
+    if (this.blockstateJsonCache.has(clean)) {
+      return this.blockstateJsonCache.get(clean) ?? null;
+    }
 
-    const cached = this.textureCache.get(normalized);
+    if (!this.zip) {
+      this.blockstateJsonCache.set(clean, null);
+      return null;
+    }
+
+    const entry = this.jarBlockstateEntries.get(clean);
+    if (!entry) {
+      this.blockstateJsonCache.set(clean, null);
+      return null;
+    }
+
+    try {
+      const parsed = JSON.parse(this.zip.readAsText(entry)) as RawBlockstateJson;
+      this.blockstateJsonCache.set(clean, parsed);
+      return parsed;
+    } catch {
+      this.blockstateJsonCache.set(clean, null);
+      return null;
+    }
+  }
+
+  private loadRawModelJson(modelName: string): RawBlockModelJson | null {
+    const clean = normalizeModelRefName(modelName);
+    if (this.modelJsonCache.has(clean)) {
+      return this.modelJsonCache.get(clean) ?? null;
+    }
+
+    if (!this.zip) {
+      this.modelJsonCache.set(clean, null);
+      return null;
+    }
+
+    const entry = this.jarModelEntries.get(clean);
+    if (!entry) {
+      this.modelJsonCache.set(clean, null);
+      return null;
+    }
+
+    try {
+      const parsed = JSON.parse(this.zip.readAsText(entry)) as RawBlockModelJson;
+      this.modelJsonCache.set(clean, parsed);
+      return parsed;
+    } catch {
+      this.modelJsonCache.set(clean, null);
+      return null;
+    }
+  }
+
+  private normalizeFaceDirection(raw?: string): McFaceDirection | undefined {
+    if (!raw) return undefined;
+    const lower = raw.toLowerCase();
+    if (ALL_FACE_DIRECTIONS.includes(lower as McFaceDirection)) {
+      return lower as McFaceDirection;
+    }
+    return undefined;
+  }
+
+  private resolveBlockModel(modelName: string): ResolvedModelInfo {
+    const cleanModel = normalizeModelRefName(modelName);
+    const cached = this.resolvedModelCache.get(cleanModel);
     if (cached) {
       return cached;
     }
 
-    let dataUrl: string | null = null;
+    const chain: RawBlockModelJson[] = [];
+    const visited = new Set<string>();
+    let currentRef: string | undefined = cleanModel;
 
-    if (this.zip && this.entrySet.size > 0) {
-      const candidates = getTextureCandidates(normalized);
-      for (const candidate of candidates) {
-        const entryName = `${BLOCK_TEXTURE_PREFIX}${candidate}.png`;
-        if (this.entrySet.has(entryName)) {
-          try {
-            const buf = this.zip.readFile(entryName);
-            if (buf && buf.length > 0) {
-              dataUrl = `data:image/png;base64,${buf.toString("base64")}`;
-              break;
+    for (let depth = 0; depth < 16 && currentRef; depth++) {
+      const cleanRef = normalizeModelRefName(currentRef);
+      if (visited.has(cleanRef) || cleanRef.startsWith("builtin/")) break;
+      visited.add(cleanRef);
+
+      const raw = this.loadRawModelJson(cleanRef);
+      if (!raw) break;
+      chain.push(raw);
+      currentRef = raw.parent;
+    }
+
+    if (chain.length === 0) {
+      const fallbackInfo: ResolvedModelInfo = {
+        elements: [
+          {
+            from: [0, 0, 0],
+            to: [16, 16, 16],
+            faces: Object.fromEntries(
+              ALL_FACE_DIRECTIONS.map((dir) => [
+                dir,
+                { textureKey: cleanModel, cullface: dir } satisfies ResolvedModelFace,
+              ])
+            ),
+          },
+        ],
+        isFluid: false,
+        primaryTextureKey: cleanModel,
+      };
+      this.resolvedModelCache.set(cleanModel, fallbackInfo);
+      return fallbackInfo;
+    }
+
+    // Child textures override parent textures
+    const mergedTextures: Record<string, string> = {};
+    for (let i = chain.length - 1; i >= 0; i--) {
+      const texMap = chain[i].textures;
+      if (texMap) {
+        Object.assign(mergedTextures, texMap);
+      }
+    }
+
+    const resolveConcreteTexture = (val: string | undefined): string | null => {
+      let cur = val;
+      for (let i = 0; i < 16 && cur; i++) {
+        if (cur.startsWith("#")) {
+          cur = mergedTextures[cur.slice(1)];
+        } else {
+          return normalizeTextureRefName(cur);
+        }
+      }
+      return null;
+    };
+
+    const rawElements = chain.find((m) => Array.isArray(m.elements) && m.elements.length > 0)?.elements;
+
+    if (!rawElements || rawElements.length === 0) {
+      // Models without elements (e.g. fluids water/lava or entity-rendered blocks with particle texture)
+      const particleTex =
+        resolveConcreteTexture(mergedTextures.particle) ??
+        resolveConcreteTexture(Object.values(mergedTextures)[0]) ??
+        cleanModel;
+      const isWaterFluid =
+        particleTex === "water_still" || particleTex === "water_flow";
+      const isFluid =
+        isWaterFluid ||
+        particleTex === "lava_still" ||
+        particleTex === "lava_flow";
+      const tintindex = isWaterFluid ? 0 : undefined;
+      const textureKey = tintindex !== undefined ? `${particleTex}#tinted` : particleTex;
+
+      const synthElement: ResolvedModelElement = {
+        from: [0, 0, 0],
+        to: [16, 16, 16],
+        faces: Object.fromEntries(
+          ALL_FACE_DIRECTIONS.map((dir) => [
+            dir,
+            {
+              textureKey,
+              cullface: dir,
+              ...(tintindex !== undefined ? { tintindex } : {}),
+            } satisfies ResolvedModelFace,
+          ])
+        ),
+      };
+
+      const info: ResolvedModelInfo = {
+        elements: [synthElement],
+        isFluid,
+        primaryTextureKey: textureKey,
+      };
+      this.resolvedModelCache.set(cleanModel, info);
+      return info;
+    }
+
+    const resolvedElements: ResolvedModelElement[] = [];
+    let primaryTextureKey: string | null = null;
+
+    for (const el of rawElements) {
+      const faces: Partial<Record<McFaceDirection, ResolvedModelFace>> = {};
+      for (const [rawDir, rawFace] of Object.entries(el.faces ?? {})) {
+        const dir = this.normalizeFaceDirection(rawDir);
+        if (!dir || !rawFace) continue;
+
+        const concrete =
+          resolveConcreteTexture(rawFace.texture) ??
+          resolveConcreteTexture(mergedTextures.particle) ??
+          cleanModel;
+
+        const isWaterTex = concrete === "water_still" || concrete === "water_flow";
+        const effectiveTint =
+          rawFace.tintindex !== undefined ? rawFace.tintindex : isWaterTex ? 0 : undefined;
+        const textureKey = effectiveTint !== undefined ? `${concrete}#tinted` : concrete;
+
+        if (!primaryTextureKey) {
+          primaryTextureKey = textureKey;
+        }
+
+        const resolvedFace: ResolvedModelFace = {
+          textureKey,
+        };
+        if (Array.isArray(rawFace.uv) && rawFace.uv.length === 4) {
+          resolvedFace.uv = [rawFace.uv[0], rawFace.uv[1], rawFace.uv[2], rawFace.uv[3]];
+        }
+        if (typeof rawFace.rotation === "number") {
+          resolvedFace.rotation = rawFace.rotation;
+        }
+        const cull = this.normalizeFaceDirection(rawFace.cullface);
+        if (cull) {
+          resolvedFace.cullface = cull;
+        }
+        if (effectiveTint !== undefined) {
+          resolvedFace.tintindex = effectiveTint;
+        }
+
+        faces[dir] = resolvedFace;
+      }
+
+      let rotation: ResolvedModelElementRotation | undefined;
+      if (el.rotation && Array.isArray(el.rotation.origin) && el.rotation.origin.length === 3) {
+        rotation = {
+          origin: [el.rotation.origin[0], el.rotation.origin[1], el.rotation.origin[2]],
+          ...(el.rotation.axis ? { axis: el.rotation.axis } : {}),
+          ...(typeof el.rotation.angle === "number" ? { angle: el.rotation.angle } : {}),
+          ...(typeof el.rotation.x === "number" ? { x: el.rotation.x } : {}),
+          ...(typeof el.rotation.y === "number" ? { y: el.rotation.y } : {}),
+          ...(typeof el.rotation.z === "number" ? { z: el.rotation.z } : {}),
+          ...(typeof el.rotation.rescale === "boolean" ? { rescale: el.rotation.rescale } : {}),
+        };
+      }
+
+      resolvedElements.push({
+        from: [el.from[0], el.from[1], el.from[2]],
+        to: [el.to[0], el.to[1], el.to[2]],
+        ...(rotation ? { rotation } : {}),
+        ...(typeof el.shade === "boolean" ? { shade: el.shade } : {}),
+        faces,
+      });
+    }
+
+    if (!primaryTextureKey) {
+      primaryTextureKey = resolveConcreteTexture(mergedTextures.particle) ?? cleanModel;
+    }
+
+    const info: ResolvedModelInfo = {
+      elements: resolvedElements,
+      isFluid: false,
+      primaryTextureKey,
+    };
+    this.resolvedModelCache.set(cleanModel, info);
+    return info;
+  }
+
+  private resolveTextureAsset(textureKey: string): ResolvedTextureAsset {
+    const cached = this.textureAssetCache.get(textureKey);
+    if (cached) {
+      return cached;
+    }
+
+    const isTinted = textureKey.endsWith("#tinted");
+    const baseName = isTinted ? textureKey.slice(0, -"#tinted".length) : textureKey;
+    const isWaterTex = baseName === "water_still" || baseName === "water_flow";
+    const tintRgb = isTinted
+      ? isWaterTex
+        ? DEFAULT_WATER_TINT
+        : DEFAULT_GRASS_FOLIAGE_TINT
+      : null;
+
+    if (this.zip) {
+      const entry = this.jarTextureEntries.get(baseName);
+      if (entry) {
+        try {
+          const rawBuf = this.zip.readFile(entry);
+          if (rawBuf && rawBuf.length > 0) {
+            const src = PNG.sync.read(rawBuf);
+            const isAnimatedStrip =
+              src.height > src.width && src.width > 0 && src.height % src.width === 0;
+            const outW = src.width;
+            const outH = isAnimatedStrip ? src.width : src.height;
+
+            let isOpaque = true;
+            let hasTranslucentAlpha = false;
+
+            if (!isAnimatedStrip && !tintRgb && !isWaterTex) {
+              for (let y = 0; y < outH; y++) {
+                for (let x = 0; x < outW; x++) {
+                  const a = src.data[(y * outW + x) * 4 + 3];
+                  if (a < 255) isOpaque = false;
+                  if (a > 10 && a < 245) hasTranslucentAlpha = true;
+                }
+              }
+              const asset: ResolvedTextureAsset = {
+                dataUrl: `data:image/png;base64,${rawBuf.toString("base64")}`,
+                hasTranslucentAlpha,
+                isOpaque,
+              };
+              this.textureAssetCache.set(textureKey, asset);
+              return asset;
             }
-          } catch {
-            // Try next candidate
+
+            const out = new PNG({ width: outW, height: outH });
+            for (let y = 0; y < outH; y++) {
+              for (let x = 0; x < outW; x++) {
+                const idx = (y * outW + x) * 4;
+                let r = src.data[idx];
+                let g = src.data[idx + 1];
+                let b = src.data[idx + 2];
+                let a = src.data[idx + 3];
+
+                if (a < 255) isOpaque = false;
+                if (a > 10 && a < 245) hasTranslucentAlpha = true;
+
+                if (tintRgb) {
+                  r = clampByte((r * tintRgb[0]) / 255);
+                  g = clampByte((g * tintRgb[1]) / 255);
+                  b = clampByte((b * tintRgb[2]) / 255);
+                }
+
+                if (isWaterTex && a > 0) {
+                  a = Math.max(a, 224);
+                }
+
+                out.data[idx] = r;
+                out.data[idx + 1] = g;
+                out.data[idx + 2] = b;
+                out.data[idx + 3] = a;
+              }
+            }
+
+            const outBuf = PNG.sync.write(out);
+            const asset: ResolvedTextureAsset = {
+              dataUrl: `data:image/png;base64,${outBuf.toString("base64")}`,
+              hasTranslucentAlpha,
+              isOpaque,
+            };
+            this.textureAssetCache.set(textureKey, asset);
+            return asset;
           }
+        } catch {
+          // Fall through to procedural PNG generation
         }
       }
     }
 
-    if (!dataUrl) {
-      dataUrl = generateProceduralBlockPngDataUrl(normalized);
+    const fallbackDataUrl = generateProceduralBlockPngDataUrl(baseName);
+    const fallbackBuf = Buffer.from(
+      fallbackDataUrl.replace(/^data:image\/png;base64,/, ""),
+      "base64"
+    );
+    let isOpaque = true;
+    let hasTranslucentAlpha = false;
+    try {
+      const png = PNG.sync.read(fallbackBuf);
+      for (let i = 3; i < png.data.length; i += 4) {
+        const a = png.data[i];
+        if (a < 255) isOpaque = false;
+        if (a > 10 && a < 245) hasTranslucentAlpha = true;
+      }
+    } catch {
+      // ignore
     }
 
-    this.textureCache.set(normalized, dataUrl);
-    return dataUrl;
+    const asset: ResolvedTextureAsset = {
+      dataUrl: fallbackDataUrl,
+      hasTranslucentAlpha,
+      isOpaque,
+    };
+    this.textureAssetCache.set(textureKey, asset);
+    return asset;
+  }
+
+  private normalizeAppliedRef(raw: RawAppliedRefJson): AppliedModelRef {
+    return {
+      model: normalizeModelRefName(raw.model),
+      ...(typeof raw.x === "number" ? { x: raw.x } : {}),
+      ...(typeof raw.y === "number" ? { y: raw.y } : {}),
+      ...(typeof raw.uvlock === "boolean" ? { uvlock: raw.uvlock } : {}),
+    };
+  }
+
+  private isFullCubeModelOpaque(elements: ResolvedModelElement[]): boolean {
+    const coveredFaces = new Set<McFaceDirection>();
+    for (const el of elements) {
+      if (el.rotation) continue;
+      if (
+        el.from[0] !== 0 ||
+        el.from[1] !== 0 ||
+        el.from[2] !== 0 ||
+        el.to[0] !== 16 ||
+        el.to[1] !== 16 ||
+        el.to[2] !== 16
+      ) {
+        continue;
+      }
+      for (const dir of ALL_FACE_DIRECTIONS) {
+        const face = el.faces[dir];
+        if (!face) continue;
+        const asset = this.resolveTextureAsset(face.textureKey);
+        if (asset.isOpaque) {
+          coveredFaces.add(dir);
+        }
+      }
+    }
+    return ALL_FACE_DIRECTIONS.every((d) => coveredFaces.has(d));
   }
 
   /**
-   * Batch-resolves an array of block names into a map of normalized block name -> Data URL.
+   * Compiles a block's blockstate + model parent chains + texture opacity metadata
+   * strictly from `.jar` data (or falls back to a default single-cube definition when absent).
+   */
+  public compileBlockDefinition(blockName: string): CompiledBlockDefinition {
+    this.ensureInitialized();
+    const normalized = normalizeBlockName(blockName);
+    const cached = this.blockDefCache.get(normalized);
+    if (cached) {
+      return cached;
+    }
+
+    const rawState = this.loadRawBlockstateJson(normalized);
+    if (!rawState || (!rawState.variants && !rawState.multipart)) {
+      const modelInfo = this.resolveBlockModel(normalized);
+      let hasTranslucent = modelInfo.isFluid;
+      for (const el of modelInfo.elements) {
+        for (const face of Object.values(el.faces)) {
+          if (!face) continue;
+          const asset = this.resolveTextureAsset(face.textureKey);
+          if (asset.hasTranslucentAlpha) hasTranslucent = true;
+        }
+      }
+      const def: CompiledBlockDefinition = {
+        blockName: normalized,
+        variants: { "": [{ model: normalized }] },
+        models: { [normalized]: modelInfo.elements },
+        isFullOpaqueCube:
+          !modelInfo.isFluid &&
+          !hasTranslucent &&
+          this.isFullCubeModelOpaque(modelInfo.elements),
+        isFluid: modelInfo.isFluid,
+        isTranslucent: modelInfo.isFluid || hasTranslucent,
+      };
+      this.blockDefCache.set(normalized, def);
+      return def;
+    }
+
+    const models: Record<string, ResolvedModelElement[]> = {};
+    const referencedModels = new Set<string>();
+    let variants: Record<string, AppliedModelRef[]> | undefined;
+    let multipart: MultipartCase[] | undefined;
+
+    if (rawState.variants) {
+      variants = {};
+      for (const [stateKey, rawVal] of Object.entries(rawState.variants)) {
+        const chosen = Array.isArray(rawVal) ? rawVal[0] : rawVal;
+        if (!chosen || !chosen.model) continue;
+        const ref = this.normalizeAppliedRef(chosen);
+        referencedModels.add(ref.model);
+        variants[stateKey] = [ref];
+      }
+    }
+
+    if (rawState.multipart) {
+      multipart = [];
+      for (const mc of rawState.multipart) {
+        const chosen = Array.isArray(mc.apply) ? mc.apply[0] : mc.apply;
+        if (!chosen || !chosen.model) continue;
+        const ref = this.normalizeAppliedRef(chosen);
+        referencedModels.add(ref.model);
+        multipart.push({
+          ...(mc.when ? { when: mc.when } : {}),
+          apply: [ref],
+        });
+      }
+    }
+
+    let isFluid = false;
+    let hasTranslucentAlpha = false;
+    const modelOpacity = new Map<string, boolean>();
+
+    for (const modelKey of referencedModels) {
+      const info = this.resolveBlockModel(modelKey);
+      models[modelKey] = info.elements;
+      if (info.isFluid) {
+        isFluid = true;
+      }
+      for (const el of info.elements) {
+        for (const face of Object.values(el.faces)) {
+          if (!face) continue;
+          const asset = this.resolveTextureAsset(face.textureKey);
+          if (asset.hasTranslucentAlpha) {
+            hasTranslucentAlpha = true;
+          }
+        }
+      }
+      modelOpacity.set(modelKey, this.isFullCubeModelOpaque(info.elements));
+    }
+
+    const isTranslucent = isFluid || hasTranslucentAlpha;
+    let isFullOpaqueCube = false;
+    if (variants && Object.keys(variants).length > 0 && !isFluid && !isTranslucent) {
+      isFullOpaqueCube = Object.values(variants).every(
+        (refs) =>
+          refs.length > 0 &&
+          refs.every((r) => modelOpacity.get(r.model) === true)
+      );
+    }
+
+    const def: CompiledBlockDefinition = {
+      blockName: normalized,
+      ...(variants ? { variants } : {}),
+      ...(multipart ? { multipart } : {}),
+      models,
+      isFullOpaqueCube,
+      isFluid,
+      isTranslucent,
+    };
+    this.blockDefCache.set(normalized, def);
+    return def;
+  }
+
+  /**
+   * Resolves a single block name to its primary `data:image/png;base64,...` texture URL.
+   */
+  public getBlockTextureDataUrl(blockName: string): string {
+    this.ensureInitialized();
+    const def = this.compileBlockDefinition(blockName);
+    for (const elements of Object.values(def.models)) {
+      for (const el of elements) {
+        for (const face of Object.values(el.faces)) {
+          if (face?.textureKey) {
+            return this.resolveTextureAsset(face.textureKey).dataUrl;
+          }
+        }
+      }
+    }
+    return this.resolveTextureAsset(normalizeBlockName(blockName)).dataUrl;
+  }
+
+  /**
+   * Batch-compiles `CompiledBlockDefinition` objects for a list of block names.
+   */
+  public getBlockModelsForBlocks(
+    blockNames: string[]
+  ): Record<string, CompiledBlockDefinition> {
+    this.ensureInitialized();
+    const result: Record<string, CompiledBlockDefinition> = {};
+    for (const rawName of blockNames) {
+      if (!rawName) continue;
+      const normalized = normalizeBlockName(rawName);
+      if (!normalized || normalized === "air" || normalized === "cave_air" || normalized === "void_air") {
+        continue;
+      }
+      if (!(normalized in result)) {
+        const def = this.compileBlockDefinition(normalized);
+        result[normalized] = def;
+        result[`minecraft:${normalized}`] = def;
+      }
+    }
+    return result;
+  }
+
+  /**
+   * Batch-resolves all texture keys referenced by the compiled models for `blockNames`
+   * (plus each block's normalized name as a fallback PNG Data URL).
    */
   public getTexturesForBlocks(blockNames: string[]): Record<string, string> {
     this.ensureInitialized();
     const result: Record<string, string> = {};
+
     for (const rawName of blockNames) {
       if (!rawName) continue;
       const normalized = normalizeBlockName(rawName);
-      if (!normalized || normalized === "air") continue;
+      if (!normalized || normalized === "air" || normalized === "cave_air" || normalized === "void_air") {
+        continue;
+      }
+
+      const def = this.compileBlockDefinition(normalized);
+      let firstTextureKey: string | null = null;
+
+      for (const elements of Object.values(def.models)) {
+        for (const el of elements) {
+          for (const face of Object.values(el.faces)) {
+            if (!face?.textureKey) continue;
+            if (!firstTextureKey) {
+              firstTextureKey = face.textureKey;
+            }
+            if (!(face.textureKey in result)) {
+              result[face.textureKey] = this.resolveTextureAsset(face.textureKey).dataUrl;
+            }
+          }
+        }
+      }
+
       if (!(normalized in result)) {
-        result[normalized] = this.getBlockTextureDataUrl(normalized);
+        const primaryUrl = firstTextureKey
+          ? result[firstTextureKey] ?? this.resolveTextureAsset(firstTextureKey).dataUrl
+          : this.resolveTextureAsset(normalized).dataUrl;
+        result[normalized] = primaryUrl;
       }
     }
+
     return result;
   }
 
@@ -929,12 +1357,11 @@ export class JarAssetLoader {
     return {
       jarFound: this.jarPath !== null,
       jarPath: this.jarPath,
-      cachedCount: this.textureCache.size,
+      cachedCount: this.textureAssetCache.size,
     };
   }
 }
 
-// Default singleton instance and convenience exports
 export const defaultJarAssetLoader = new JarAssetLoader();
 
 export function getJarPath(): string | null {
@@ -943,6 +1370,12 @@ export function getJarPath(): string | null {
 
 export function getBlockTextureDataUrl(blockName: string): string {
   return defaultJarAssetLoader.getBlockTextureDataUrl(blockName);
+}
+
+export function getBlockModelsForBlocks(
+  blockNames: string[]
+): Record<string, CompiledBlockDefinition> {
+  return defaultJarAssetLoader.getBlockModelsForBlocks(blockNames);
 }
 
 export function getTexturesForBlocks(blockNames: string[]): Record<string, string> {

@@ -1,6 +1,7 @@
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import type {
+  CompiledBlockDefinition,
   InspectResult,
   TraceRecord,
   ViewDirection,
@@ -23,6 +24,7 @@ class MineBuildingViewer {
   private controls: OrbitControls;
 
   private visualGroup: THREE.Group | null = null;
+  private syncGeneration = 0;
   private gridHelper: THREE.GridHelper | null = null;
   private debugMarkerGroup: THREE.Group;
 
@@ -201,8 +203,22 @@ class MineBuildingViewer {
     voxels: VoxelData[],
     size: [number, number, number],
     traces?: Record<number, TraceRecord>,
-    textures?: Record<string, string>
+    textures?: Record<string, string>,
+    blockModels?: Record<string, CompiledBlockDefinition>
   ): Promise<void> {
+    const gen = ++this.syncGeneration;
+    const built = await buildWorldMeshes(voxels, size, textures, blockModels);
+
+    if (gen !== this.syncGeneration) {
+      built.visualGroup.traverse((obj) => {
+        if (obj instanceof THREE.Mesh || obj instanceof THREE.LineSegments) {
+          obj.geometry.dispose();
+        }
+      });
+      built.pickerGeometry.dispose();
+      return;
+    }
+
     this.worldSize = size;
     this.updateGridHelper(size);
 
@@ -215,7 +231,6 @@ class MineBuildingViewer {
       });
     }
 
-    const built = await buildWorldMeshes(voxels, size, textures);
     this.visualGroup = built.visualGroup;
     this.worldBounds = built.bounds;
     this.scene.add(this.visualGroup);
@@ -592,7 +607,7 @@ class MineBuildingViewer {
   private async handleWsRequest(req: WsRequest): Promise<void> {
     switch (req.type) {
       case "SYNC_WORLD": {
-        await this.syncWorld(req.voxels, req.size, req.traces, req.textures);
+        await this.syncWorld(req.voxels, req.size, req.traces, req.textures, req.blockModels);
         this.sendWsResponse({
           type: "SYNC_ACK",
           id: req.id

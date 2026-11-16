@@ -6,6 +6,7 @@ import { chromium, type Browser, type Page } from "playwright";
 import { createServer, type Logger, type ViteDevServer } from "vite";
 import { WebSocket, WebSocketServer } from "ws";
 import type {
+  CompiledBlockDefinition,
   InspectResult,
   TraceRecord,
   ViewDirection,
@@ -13,6 +14,7 @@ import type {
   WsRequest,
   WsResponse,
 } from "../types/shared.js";
+import { defaultJarAssetLoader } from "../assets/jar-loader.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -69,6 +71,7 @@ export interface SyncWorldParams {
   size: [number, number, number];
   traces?: Record<number, TraceRecord>;
   textures?: Record<string, string>;
+  blockModels?: Record<string, CompiledBlockDefinition>;
 }
 
 export interface WsBridgeOptions {
@@ -338,38 +341,68 @@ export class WsBridge {
 
         if (!this.browser || !this.browser.isConnected()) {
           process.stderr.write("[WsBridge] Launching headless Chromium for Three.js viewer...\n");
-          const candidatePaths = [
+          const fs = await import("node:fs");
+          const envPaths = [
             process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
             process.env.CHROME_PATH,
+          ].filter((p): p is string => Boolean(p && fs.existsSync(p)));
+
+          const systemPaths = [
             "/usr/bin/chromium",
             "/usr/bin/chromium-browser",
             "/usr/bin/google-chrome",
             "/usr/bin/google-chrome-stable",
             "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-          ].filter((p): p is string => Boolean(p));
+          ].filter((p) => fs.existsSync(p));
 
-          let executablePath: string | undefined;
-          const fs = await import("node:fs");
           const defaultExecPath = chromium.executablePath();
-          if (defaultExecPath && fs.existsSync(defaultExecPath)) {
-            executablePath = defaultExecPath;
-          } else {
-            executablePath = candidatePaths.find((p) => fs.existsSync(p));
+          const hasDefaultExec = Boolean(defaultExecPath && fs.existsSync(defaultExecPath));
+
+          type LaunchTarget = { label: string; executablePath?: string; channel?: string };
+          const targets: LaunchTarget[] = [
+            ...envPaths.map((p) => ({ label: `env:${p}`, executablePath: p })),
+            { label: "channel:chrome", channel: "chrome" },
+            { label: "channel:msedge", channel: "msedge" },
+            ...(hasDefaultExec ? [{ label: "playwright-chromium", executablePath: defaultExecPath }] : []),
+            ...systemPaths.map((p) => ({ label: `system:${p}`, executablePath: p })),
+            ...(hasDefaultExec ? [] : [{ label: "playwright-default" }]),
+          ];
+
+          const launchArgs = [
+            "--use-gl=angle",
+            "--use-angle=swiftshader",
+            "--enable-unsafe-swiftshader",
+            "--enable-webgl",
+            "--ignore-gpu-blocklist",
+            "--no-sandbox",
+            "--disable-setuid-sandbox",
+            "--disable-dev-shm-usage",
+          ];
+
+          let lastError: unknown;
+          for (const target of targets) {
+            try {
+              this.browser = await chromium.launch({
+                headless: this.headless,
+                ...(target.executablePath ? { executablePath: target.executablePath } : {}),
+                ...(target.channel ? { channel: target.channel } : {}),
+                args: launchArgs,
+              });
+              process.stderr.write(`[WsBridge] Launched headless browser via ${target.label}\n`);
+              break;
+            } catch (err) {
+              lastError = err;
+              process.stderr.write(
+                `[WsBridge] Launch attempt (${target.label}) failed, trying next fallback...\n`
+              );
+            }
           }
 
-          this.browser = await chromium.launch({
-            headless: this.headless,
-            ...(executablePath ? { executablePath } : {}),
-            args: [
-              "--use-gl=angle",
-              "--use-angle=swiftshader",
-              "--enable-webgl",
-              "--ignore-gpu-blocklist",
-              "--no-sandbox",
-              "--disable-setuid-sandbox",
-              "--disable-dev-shm-usage",
-            ],
-          });
+          if (!this.browser) {
+            throw lastError instanceof Error
+              ? lastError
+              : new Error(`Failed to launch any headless browser: ${String(lastError)}`);
+          }
         }
 
         if (this.page && !this.page.isClosed()) {
@@ -420,6 +453,15 @@ export class WsBridge {
    * caches the payload for future connections, and awaits `SYNC_ACK` from at least one client.
    */
   public async syncWorld(params: SyncWorldParams): Promise<void> {
+    let textures = params.textures;
+    let blockModels = params.blockModels;
+    if (!blockModels) {
+      const uniqueNames = Array.from(new Set(params.voxels.map((v) => v.name)));
+      blockModels = defaultJarAssetLoader.getBlockModelsForBlocks(uniqueNames);
+      const modelTextures = defaultJarAssetLoader.getTexturesForBlocks(uniqueNames);
+      textures = textures ? { ...modelTextures, ...textures } : modelTextures;
+    }
+
     const id = randomUUID();
     const request: Extract<WsRequest, { type: "SYNC_WORLD" }> = {
       type: "SYNC_WORLD",
@@ -427,7 +469,8 @@ export class WsBridge {
       voxels: params.voxels,
       size: params.size,
       traces: params.traces,
-      textures: params.textures,
+      textures,
+      blockModels,
     };
 
     await this.ensureClientConnected();

@@ -1,14 +1,13 @@
 import * as THREE from "three";
-import type { BlockState, VoxelData } from "../types/shared.js";
-
-export interface BoxPart {
-  cx: number;
-  cy: number;
-  cz: number;
-  sx: number;
-  sy: number;
-  sz: number;
-}
+import type {
+  AppliedModelRef,
+  CompiledBlockDefinition,
+  McFaceDirection,
+  MultipartCondition,
+  ResolvedModelElement,
+  ResolvedModelElementRotation,
+  VoxelData,
+} from "../types/shared.js";
 
 export interface BuiltWorldMeshes {
   visualGroup: THREE.Group;
@@ -21,7 +20,12 @@ export interface BuiltWorldMeshes {
   };
 }
 
-const textureCache = new Map<string, THREE.Texture>();
+interface LoadedTextureAsset {
+  texture: THREE.Texture;
+  isTranslucent: boolean;
+}
+
+const textureAssetCache = new Map<string, LoadedTextureAsset>();
 const textureLoader = new THREE.TextureLoader();
 
 function normalizeBlockName(name: string): string {
@@ -37,56 +41,23 @@ function hashString(str: string): number {
   return h >>> 0;
 }
 
-function getBaseBlockPalette(shortName: string): { base: [number, number, number]; accent: [number, number, number] } {
-  if (shortName.includes("grass")) return { base: [95, 159, 53], accent: [76, 133, 41] };
-  if (shortName.includes("dirt") || shortName.includes("podzol") || shortName.includes("farmland")) {
-    return { base: [134, 96, 67], accent: [112, 79, 54] };
-  }
-  if (shortName.includes("stone_brick")) return { base: [122, 125, 128], accent: [98, 101, 104] };
-  if (shortName.includes("cobble")) return { base: [115, 115, 115], accent: [88, 88, 88] };
-  if (shortName.includes("deepslate")) return { base: [72, 74, 79], accent: [54, 56, 61] };
-  if (shortName.includes("andesite") || shortName.includes("stone") || shortName.includes("gravel")) {
-    return { base: [130, 132, 135], accent: [110, 112, 115] };
-  }
-  if (shortName.includes("spruce")) return { base: [114, 84, 48], accent: [92, 67, 37] };
-  if (shortName.includes("dark_oak")) return { base: [66, 43, 20], accent: [51, 33, 15] };
-  if (shortName.includes("birch")) return { base: [196, 179, 123], accent: [175, 158, 105] };
-  if (shortName.includes("oak_log") || shortName.includes("log") || shortName.includes("wood")) {
-    return { base: [109, 85, 50], accent: [84, 65, 38] };
-  }
-  if (shortName.includes("oak") || shortName.includes("plank") || shortName.includes("slab") || shortName.includes("stair")) {
-    return { base: [162, 130, 78], accent: [139, 110, 63] };
-  }
-  if (shortName.includes("brick")) return { base: [150, 74, 60], accent: [122, 56, 45] };
-  if (shortName.includes("sand")) return { base: [219, 207, 163], accent: [199, 186, 141] };
-  if (shortName.includes("water")) return { base: [45, 118, 224], accent: [36, 98, 196] };
-  if (shortName.includes("glass")) return { base: [185, 226, 245], accent: [140, 198, 225] };
-  if (shortName.includes("leaf") || shortName.includes("leaves")) {
-    return { base: [62, 128, 47], accent: [46, 102, 34] };
-  }
-  if (shortName.includes("lantern") || shortName.includes("glow") || shortName.includes("torch")) {
-    return { base: [248, 202, 88], accent: [219, 148, 42] };
-  }
-  if (shortName.includes("quartz") || shortName.includes("white") || shortName.includes("snow") || shortName.includes("calcite")) {
-    return { base: [232, 229, 222], accent: [208, 204, 196] };
-  }
-  if (shortName.includes("roof") || shortName.includes("terracotta") || shortName.includes("copper")) {
-    return { base: [158, 86, 67], accent: [132, 69, 52] };
-  }
-
+function getFallbackColorPalette(shortName: string): {
+  base: [number, number, number];
+  accent: [number, number, number];
+} {
   const h = hashString(shortName);
   const r = 90 + (h & 0x7f);
   const g = 90 + ((h >> 8) & 0x7f);
   const b = 90 + ((h >> 16) & 0x7f);
   return {
     base: [r, g, b],
-    accent: [Math.max(0, r - 24), Math.max(0, g - 24), Math.max(0, b - 24)]
+    accent: [Math.max(0, r - 24), Math.max(0, g - 24), Math.max(0, b - 24)],
   };
 }
 
-function createProceduralBlockTexture(blockName: string): THREE.CanvasTexture {
-  const shortName = normalizeBlockName(blockName);
-  const { base, accent } = getBaseBlockPalette(shortName);
+function createProceduralFallbackAsset(keyName: string): LoadedTextureAsset {
+  const shortName = normalizeBlockName(keyName.replace(/#tinted$/, ""));
+  const { base, accent } = getFallbackColorPalette(shortName);
 
   const canvas = document.createElement("canvas");
   canvas.width = 16;
@@ -104,15 +75,8 @@ function createProceduralBlockTexture(blockName: string): THREE.CanvasTexture {
   for (let y = 0; y < 16; y++) {
     for (let x = 0; x < 16; x++) {
       const isBorder = x === 0 || y === 0 || x === 15 || y === 15;
-      const isBrickMortar =
-        shortName.includes("brick") &&
-        (y % 4 === 0 || ((x + (Math.floor(y / 4) % 2) * 4) % 8 === 0));
-      const isPlankSeam =
-        (shortName.includes("plank") || shortName.includes("oak") || shortName.includes("spruce")) &&
-        (y % 4 === 0 || (x === ((Math.floor(y / 4) * 5) % 15)));
-
       const n = (nextRand() - 0.5) * 18;
-      const palette = isBorder || isBrickMortar || isPlankSeam ? accent : base;
+      const palette = isBorder ? accent : base;
       const r = Math.max(0, Math.min(255, Math.round(palette[0] + n)));
       const g = Math.max(0, Math.min(255, Math.round(palette[1] + n)));
       const b = Math.max(0, Math.min(255, Math.round(palette[2] + n)));
@@ -127,18 +91,52 @@ function createProceduralBlockTexture(blockName: string): THREE.CanvasTexture {
   texture.colorSpace = THREE.SRGBColorSpace;
   texture.generateMipmaps = false;
   texture.needsUpdate = true;
-  return texture;
+  return { texture, isTranslucent: false };
 }
 
-async function resolveBlockTexture(
-  blockName: string,
-  textures?: Record<string, string>
-): Promise<THREE.Texture> {
-  const shortName = normalizeBlockName(blockName);
-  const dataUrl = textures?.[blockName] ?? textures?.[shortName] ?? textures?.[`minecraft:${shortName}`];
-  const cacheKey = dataUrl ? `${shortName}:${dataUrl.slice(0, 64)}` : `proc:${shortName}`;
+function detectImageTranslucency(image: HTMLImageElement | HTMLCanvasElement): boolean {
+  try {
+    const w = image.width || 16;
+    const h = image.height || 16;
+    const canvas = document.createElement("canvas");
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return false;
+    ctx.drawImage(image, 0, 0, w, h);
+    const data = ctx.getImageData(0, 0, w, h).data;
+    for (let i = 3; i < data.length; i += 4) {
+      const a = data[i];
+      if (a > 10 && a < 245) {
+        return true;
+      }
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
 
-  const existing = textureCache.get(cacheKey);
+async function resolveTextureAsset(
+  textureKey: string,
+  textures?: Record<string, string>,
+  fallbackBlockName?: string
+): Promise<LoadedTextureAsset> {
+  const shortKey = normalizeBlockName(textureKey);
+  const shortFallback = fallbackBlockName ? normalizeBlockName(fallbackBlockName) : shortKey;
+
+  const dataUrl =
+    textures?.[textureKey] ??
+    textures?.[shortKey] ??
+    textures?.[fallbackBlockName ?? ""] ??
+    textures?.[shortFallback] ??
+    textures?.[`minecraft:${shortFallback}`];
+
+  const cacheKey = dataUrl
+    ? `tex:${shortKey}:${dataUrl.slice(0, 64)}`
+    : `proc:${shortKey}:${shortFallback}`;
+
+  const existing = textureAssetCache.get(cacheKey);
   if (existing) return existing;
 
   if (dataUrl) {
@@ -156,188 +154,841 @@ async function resolveBlockTexture(
       loaded.colorSpace = THREE.SRGBColorSpace;
       loaded.generateMipmaps = false;
       loaded.needsUpdate = true;
-      textureCache.set(cacheKey, loaded);
-      return loaded;
+
+      const isTranslucent = loaded.image ? detectImageTranslucency(loaded.image) : false;
+      const asset: LoadedTextureAsset = { texture: loaded, isTranslucent };
+      textureAssetCache.set(cacheKey, asset);
+      return asset;
     } catch {
-      // Fallback to procedural texture if dataUrl fails
+      // Fallback to procedural texture
     }
   }
 
-  const proc = createProceduralBlockTexture(blockName);
-  textureCache.set(cacheKey, proc);
+  const proc = createProceduralFallbackAsset(shortKey || shortFallback);
+  textureAssetCache.set(cacheKey, proc);
   return proc;
 }
 
-/**
- * Computes the constituent 3D boxes for a voxel at (x, y, z) occupying [x, x+1] x [y, y+1] x [z, z+1].
- * Supports full cubes, slabs (bottom/top/double), and stairs (north/south/east/west, bottom/top).
- */
-export function getVoxelBoxes(voxel: VoxelData): BoxPart[] {
-  const { x, y, z } = voxel;
-  const shortName = normalizeBlockName(voxel.name);
-  const state: BlockState = voxel.state ?? {};
+const ALL_DIRS: McFaceDirection[] = ["down", "up", "north", "south", "west", "east"];
 
-  // Stairs: bottom half-slab + top rear half-step (or inverted if half === "top")
-  if (shortName.includes("stairs")) {
-    const isTop = state.half === "top";
-    const facing = state.facing ?? "north";
+const DIR_VECTORS: Record<McFaceDirection, [number, number, number]> = {
+  down: [0, -1, 0],
+  up: [0, 1, 0],
+  north: [0, 0, -1],
+  south: [0, 0, 1],
+  west: [-1, 0, 0],
+  east: [1, 0, 0],
+};
 
-    const baseCy = isTop ? y + 0.75 : y + 0.25;
-    const stepCy = isTop ? y + 0.25 : y + 0.75;
+const CANONICAL_STATE_DEFAULTS: Record<string, string> = {
+  facing: "north",
+  half: "bottom",
+  type: "bottom",
+  shape: "straight",
+  axis: "y",
+  hanging: "false",
+  open: "false",
+  powered: "false",
+  waterlogged: "false",
+  up: "true",
+  down: "false",
+  north: "none",
+  south: "none",
+  east: "none",
+  west: "none",
+  snowy: "false",
+  lit: "true",
+  part: "foot",
+  hinge: "left",
+  mode: "compare",
+  attachment: "floor",
+  face: "wall",
+  rotation: "0",
+  age: "0",
+  level: "0",
+  stage: "0",
+  moisture: "0",
+  bites: "0",
+  layers: "1",
+  eggs: "1",
+  pickles: "1",
+  honey_level: "0",
+  distance: "1",
+  persistent: "false",
+  extended: "false",
+  conditional: "false",
+  occupied: "false",
+  triggered: "false",
+  has_bottle_0: "false",
+  has_bottle_1: "false",
+  has_bottle_2: "false",
+  eye: "false",
+  inverted: "false",
+  locked: "false",
+  in_wall: "false",
+  attached: "false",
+  disarmed: "false",
+  short: "false",
+  bottom: "false",
+  drag: "true",
+};
 
-    const basePart: BoxPart = {
-      cx: x + 0.5,
-      cy: baseCy,
-      cz: z + 0.5,
-      sx: 1.0,
-      sy: 0.5,
-      sz: 1.0
+function getFallbackBlockDef(blockName: string): CompiledBlockDefinition {
+  const shortName = normalizeBlockName(blockName);
+  const faces = Object.fromEntries(
+    ALL_DIRS.map((dir) => [dir, { textureKey: shortName, cullface: dir }])
+  );
+  return {
+    blockName: shortName,
+    variants: { "": [{ model: shortName }] },
+    models: {
+      [shortName]: [{ from: [0, 0, 0], to: [16, 16, 16], faces }],
+    },
+    isFullOpaqueCube: true,
+    isFluid: false,
+    isTranslucent: false,
+  };
+}
+
+function getBlockDef(
+  blockName: string,
+  blockModels?: Record<string, CompiledBlockDefinition>
+): CompiledBlockDefinition {
+  if (blockModels) {
+    const direct = blockModels[blockName];
+    if (direct) return direct;
+    const shortName = normalizeBlockName(blockName);
+    const byShort = blockModels[shortName];
+    if (byShort) return byShort;
+    const byPrefixed = blockModels[`minecraft:${shortName}`];
+    if (byPrefixed) return byPrefixed;
+  }
+  return getFallbackBlockDef(blockName);
+}
+
+function hasVariantProp(def: CompiledBlockDefinition, propName: string): boolean {
+  if (!def.variants) return false;
+  const token = `${propName}=`;
+  return Object.keys(def.variants).some((k) => k.includes(token));
+}
+
+function getMultipartCardinalSignature(def: CompiledBlockDefinition): string | null {
+  if (!def.multipart) return null;
+  const vals = new Set<string>();
+  const collect = (cond?: MultipartCondition) => {
+    if (!cond) return;
+    if (Array.isArray(cond.OR)) cond.OR.forEach(collect);
+    if (Array.isArray(cond.AND)) cond.AND.forEach(collect);
+    for (const d of ["north", "south", "east", "west"]) {
+      if (cond[d] !== undefined) {
+        for (const opt of String(cond[d]).split("|")) {
+          vals.add(opt);
+        }
+      }
+    }
+    if (cond.up !== undefined) vals.add("has_up");
+  };
+  for (const mc of def.multipart) collect(mc.when);
+  if (vals.size === 0) return null;
+  return Array.from(vals).sort().join(",");
+}
+
+function dirLeft(facing: string): string {
+  switch (facing) {
+    case "north":
+      return "west";
+    case "west":
+      return "south";
+    case "south":
+      return "east";
+    case "east":
+      return "north";
+    default:
+      return "west";
+  }
+}
+
+function dirRight(facing: string): string {
+  switch (facing) {
+    case "north":
+      return "east";
+    case "east":
+      return "south";
+    case "south":
+      return "west";
+    case "west":
+      return "north";
+    default:
+      return "east";
+  }
+}
+
+function horizDelta(dir: string): [number, number] {
+  switch (dir) {
+    case "north":
+      return [0, -1];
+    case "south":
+      return [0, 1];
+    case "west":
+      return [-1, 0];
+    case "east":
+      return [1, 0];
+    default:
+      return [0, -1];
+  }
+}
+
+function computeDynamicStairShape(
+  voxel: VoxelData,
+  effectiveState: Record<string, string>,
+  voxelMap: Map<string, VoxelData>,
+  blockModels?: Record<string, CompiledBlockDefinition>
+): string {
+  const facing = effectiveState.facing ?? "north";
+  const half = effectiveState.half ?? "bottom";
+
+  const getStairState = (dx: number, dz: number): { facing: string; half: string } | null => {
+    const neighbor = voxelMap.get(`${voxel.x + dx},${voxel.y},${voxel.z + dz}`);
+    if (!neighbor) return null;
+    const nDef = getBlockDef(neighbor.name, blockModels);
+    if (!hasVariantProp(nDef, "shape")) return null;
+    return {
+      facing: (neighbor.state?.facing ?? "north").toLowerCase(),
+      half: (neighbor.state?.half ?? "bottom").toLowerCase(),
+    };
+  };
+
+  const [fx, fz] = horizDelta(facing);
+  const front = getStairState(fx, fz);
+  const left = dirLeft(facing);
+  const right = dirRight(facing);
+
+  if (front && front.half === half) {
+    if (front.facing === left) {
+      const [rx, rz] = horizDelta(right);
+      const side = getStairState(rx, rz);
+      if (!side || side.half !== half || side.facing !== facing) {
+        return "outer_left";
+      }
+    } else if (front.facing === right) {
+      const [lx, lz] = horizDelta(left);
+      const side = getStairState(lx, lz);
+      if (!side || side.half !== half || side.facing !== facing) {
+        return "outer_right";
+      }
+    }
+  }
+
+  const back = getStairState(-fx, -fz);
+  if (back && back.half === half) {
+    if (back.facing === left) {
+      const [lx, lz] = horizDelta(left);
+      const side = getStairState(lx, lz);
+      if (!side || side.half !== half || side.facing !== facing) {
+        return "inner_left";
+      }
+    } else if (back.facing === right) {
+      const [rx, rz] = horizDelta(right);
+      const side = getStairState(rx, rz);
+      if (!side || side.half !== half || side.facing !== facing) {
+        return "inner_right";
+      }
+    }
+  }
+
+  return "straight";
+}
+
+function collectMultipartDirValues(def: CompiledBlockDefinition): Record<string, Set<string>> {
+  const map: Record<string, Set<string>> = {};
+  if (!def.multipart) return map;
+
+  const visit = (cond?: MultipartCondition) => {
+    if (!cond) return;
+    if (Array.isArray(cond.OR)) cond.OR.forEach(visit);
+    if (Array.isArray(cond.AND)) cond.AND.forEach(visit);
+    for (const [k, rawVal] of Object.entries(cond)) {
+      if (k === "OR" || k === "AND" || rawVal === undefined) continue;
+      if (!map[k]) map[k] = new Set();
+      for (const opt of String(rawVal).split("|")) {
+        map[k].add(opt);
+      }
+    }
+  };
+
+  for (const mc of def.multipart) {
+    visit(mc.when);
+  }
+  return map;
+}
+
+function evaluateMultipartCondition(
+  cond: MultipartCondition | undefined,
+  state: Record<string, string>
+): boolean {
+  if (!cond) return true;
+  if (Array.isArray(cond.OR)) {
+    if (!cond.OR.some((sub) => evaluateMultipartCondition(sub, state))) {
+      return false;
+    }
+  }
+  if (Array.isArray(cond.AND)) {
+    if (!cond.AND.every((sub) => evaluateMultipartCondition(sub, state))) {
+      return false;
+    }
+  }
+  for (const [k, rawExpected] of Object.entries(cond)) {
+    if (k === "OR" || k === "AND" || rawExpected === undefined) continue;
+    const expectedOpts = String(rawExpected).split("|");
+    const actual = state[k] ?? CANONICAL_STATE_DEFAULTS[k] ?? "false";
+    if (!expectedOpts.includes(actual)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function resolveActiveModelParts(
+  voxel: VoxelData,
+  def: CompiledBlockDefinition,
+  voxelMap: Map<string, VoxelData>,
+  blockModels?: Record<string, CompiledBlockDefinition>
+): AppliedModelRef[] {
+  if (def.multipart && def.multipart.length > 0) {
+    const dirValues = collectMultipartDirValues(def);
+    const mySig = getMultipartCardinalSignature(def);
+    const effectiveState: Record<string, string> = {};
+    if (voxel.state) {
+      for (const [k, v] of Object.entries(voxel.state)) {
+        effectiveState[k.toLowerCase()] = String(v).toLowerCase();
+      }
+    }
+
+    const canConnectTo = (dx: number, dz: number): boolean => {
+      const neighbor = voxelMap.get(`${voxel.x + dx},${voxel.y},${voxel.z + dz}`);
+      if (!neighbor) return false;
+      const nDef = getBlockDef(neighbor.name, blockModels);
+      if (nDef.isFluid) return false;
+      if (nDef.isFullOpaqueCube) return true;
+      if (nDef.blockName === def.blockName) return true;
+      if (mySig && getMultipartCardinalSignature(nDef) === mySig) return true;
+      return false;
     };
 
-    let stepPart: BoxPart;
-    switch (facing) {
-      case "south":
-        stepPart = { cx: x + 0.5, cy: stepCy, cz: z + 0.75, sx: 1.0, sy: 0.5, sz: 0.5 };
-        break;
-      case "east":
-        stepPart = { cx: x + 0.75, cy: stepCy, cz: z + 0.5, sx: 0.5, sy: 0.5, sz: 1.0 };
-        break;
-      case "west":
-        stepPart = { cx: x + 0.25, cy: stepCy, cz: z + 0.5, sx: 0.5, sy: 0.5, sz: 1.0 };
-        break;
-      case "north":
-      default:
-        stepPart = { cx: x + 0.5, cy: stepCy, cz: z + 0.25, sx: 1.0, sy: 0.5, sz: 0.5 };
-        break;
-    }
+    const aboveVoxel = voxelMap.get(`${voxel.x},${voxel.y + 1},${voxel.z}`);
+    const aboveDef = aboveVoxel ? getBlockDef(aboveVoxel.name, blockModels) : null;
+    const aboveConnectsSolid = Boolean(
+      aboveDef &&
+        !aboveDef.isFluid &&
+        (aboveDef.isFullOpaqueCube || aboveDef.blockName === def.blockName)
+    );
 
-    return [basePart, stepPart];
-  }
-
-  // Slabs: half-height box (0.5 height), respects half/type === "top" | "bottom" | "double"
-  if (shortName.includes("slab")) {
-    const halfType = state.half ?? state.type ?? "bottom";
-    if (halfType === "double") {
-      return [{ cx: x + 0.5, cy: y + 0.5, cz: z + 0.5, sx: 1.0, sy: 1.0, sz: 1.0 }];
-    }
-    const isTop = halfType === "top";
-    return [
-      {
-        cx: x + 0.5,
-        cy: isTop ? y + 0.75 : y + 0.25,
-        cz: z + 0.5,
-        sx: 1.0,
-        sy: 0.5,
-        sz: 1.0
+    for (const dir of ["north", "south", "east", "west"] as const) {
+      if (!(dir in effectiveState) && dirValues[dir]) {
+        const [dx, dz] = horizDelta(dir);
+        const connected = canConnectTo(dx, dz);
+        const usesWallHeights =
+          dirValues[dir].has("low") || dirValues[dir].has("tall");
+        if (usesWallHeights) {
+          effectiveState[dir] = connected
+            ? aboveConnectsSolid
+              ? "tall"
+              : "low"
+            : "none";
+        } else {
+          effectiveState[dir] = connected ? "true" : "false";
+        }
       }
-    ];
+    }
+
+    if (!("up" in effectiveState) && dirValues.up) {
+      const isConn = (v?: string) => Boolean(v && v !== "false" && v !== "none");
+      const nC = isConn(effectiveState.north);
+      const sC = isConn(effectiveState.south);
+      const eC = isConn(effectiveState.east);
+      const wC = isConn(effectiveState.west);
+      const straightNS = nC && sC && !eC && !wC;
+      const straightEW = eC && wC && !nC && !sC;
+      if (aboveVoxel && aboveDef && !aboveDef.isFluid) {
+        effectiveState.up = "true";
+      } else if (straightNS || straightEW) {
+        effectiveState.up = "false";
+      } else {
+        effectiveState.up = "true";
+      }
+    }
+
+    const activeRefs: AppliedModelRef[] = [];
+    for (const mc of def.multipart) {
+      if (evaluateMultipartCondition(mc.when, effectiveState)) {
+        for (const ref of mc.apply) {
+          activeRefs.push(ref);
+        }
+      }
+    }
+    return activeRefs;
   }
 
-  // Default: full 1x1x1 cube occupying [x, x+1] x [y, y+1] x [z, z+1]
-  return [{ cx: x + 0.5, cy: y + 0.5, cz: z + 0.5, sx: 1.0, sy: 1.0, sz: 1.0 }];
+  if (def.variants) {
+    const entries = Object.entries(def.variants);
+    if (entries.length === 0) return [];
+    if (entries.length === 1 && entries[0][0] === "") {
+      return entries[0][1];
+    }
+
+    const effectiveState: Record<string, string> = {};
+    if (voxel.state) {
+      for (const [k, v] of Object.entries(voxel.state)) {
+        effectiveState[k.toLowerCase()] = String(v).toLowerCase();
+      }
+    }
+
+    const usesType = hasVariantProp(def, "type");
+    const usesHalf = hasVariantProp(def, "half");
+    if (usesType && !("type" in effectiveState) && "half" in effectiveState) {
+      effectiveState.type = effectiveState.half;
+    }
+    if (usesHalf && !("half" in effectiveState) && "type" in effectiveState) {
+      effectiveState.half = effectiveState.type;
+    }
+
+    if (hasVariantProp(def, "shape") && !("shape" in effectiveState)) {
+      effectiveState.shape = computeDynamicStairShape(
+        voxel,
+        effectiveState,
+        voxelMap,
+        blockModels
+      );
+    }
+
+    let bestRefs = entries[0][1];
+    let bestScore = -Infinity;
+
+    for (const [key, refs] of entries) {
+      if (key === "") {
+        if (0 > bestScore) {
+          bestScore = 0;
+          bestRefs = refs;
+        }
+        continue;
+      }
+
+      const pairs = key.split(",");
+      let score = 0;
+      let valid = true;
+
+      for (const pair of pairs) {
+        const eqIdx = pair.indexOf("=");
+        if (eqIdx === -1) continue;
+        const prop = pair.slice(0, eqIdx).trim().toLowerCase();
+        const val = pair.slice(eqIdx + 1).trim().toLowerCase();
+
+        if (prop in effectiveState) {
+          if (effectiveState[prop] === val) {
+            score += 100;
+          } else {
+            valid = false;
+            break;
+          }
+        } else if (CANONICAL_STATE_DEFAULTS[prop] === val) {
+          score += 1;
+        }
+      }
+
+      if (valid && score > bestScore) {
+        bestScore = score;
+        bestRefs = refs;
+      }
+    }
+
+    return bestRefs;
+  }
+
+  const firstModelKey = Object.keys(def.models)[0];
+  return firstModelKey ? [{ model: firstModelKey }] : [];
 }
 
-const unitBoxTemplate = new THREE.BoxGeometry(1, 1, 1);
+function getUnrotatedFaceCorners(
+  dir: McFaceDirection,
+  from: [number, number, number],
+  to: [number, number, number]
+): {
+  corners: [
+    [number, number, number],
+    [number, number, number],
+    [number, number, number],
+    [number, number, number],
+  ];
+  normal: [number, number, number];
+} {
+  const [x1, y1, z1] = from;
+  const [x2, y2, z2] = to;
 
-function appendBoxToArrays(
-  part: BoxPart,
+  switch (dir) {
+    case "south":
+      return {
+        corners: [
+          [x1, y2, z2],
+          [x1, y1, z2],
+          [x2, y1, z2],
+          [x2, y2, z2],
+        ],
+        normal: [0, 0, 1],
+      };
+    case "north":
+      return {
+        corners: [
+          [x2, y2, z1],
+          [x2, y1, z1],
+          [x1, y1, z1],
+          [x1, y2, z1],
+        ],
+        normal: [0, 0, -1],
+      };
+    case "east":
+      return {
+        corners: [
+          [x2, y2, z2],
+          [x2, y1, z2],
+          [x2, y1, z1],
+          [x2, y2, z1],
+        ],
+        normal: [1, 0, 0],
+      };
+    case "west":
+      return {
+        corners: [
+          [x1, y2, z1],
+          [x1, y1, z1],
+          [x1, y1, z2],
+          [x1, y2, z2],
+        ],
+        normal: [-1, 0, 0],
+      };
+    case "up":
+      return {
+        corners: [
+          [x1, y2, z1],
+          [x1, y2, z2],
+          [x2, y2, z2],
+          [x2, y2, z1],
+        ],
+        normal: [0, 1, 0],
+      };
+    case "down":
+      return {
+        corners: [
+          [x1, y1, z2],
+          [x1, y1, z1],
+          [x2, y1, z1],
+          [x2, y1, z2],
+        ],
+        normal: [0, -1, 0],
+      };
+  }
+}
+
+function getDefaultFaceUv(
+  dir: McFaceDirection,
+  from: [number, number, number],
+  to: [number, number, number]
+): [number, number, number, number] {
+  const [x1, y1, z1] = from;
+  const [x2, y2, z2] = to;
+  switch (dir) {
+    case "down":
+      return [x1, 16 - z2, x2, 16 - z1];
+    case "up":
+      return [x1, z1, x2, z2];
+    case "north":
+      return [16 - x2, 16 - y2, 16 - x1, 16 - y1];
+    case "south":
+      return [x1, 16 - y2, x2, 16 - y1];
+    case "west":
+      return [z1, 16 - y2, z2, 16 - y1];
+    case "east":
+      return [16 - z2, 16 - y2, 16 - z1, 16 - y1];
+  }
+}
+
+function rotatePointAroundAxis(
+  p: [number, number, number],
+  origin: [number, number, number],
+  axis: "x" | "y" | "z",
+  angleDeg: number,
+  rescale: boolean,
+  isNormal: boolean
+): [number, number, number] {
+  const rad = (angleDeg * Math.PI) / 180;
+  const cos = Math.cos(rad);
+  const sin = Math.sin(rad);
+  const invCos = rescale && !isNormal && Math.abs(cos) > 1e-4 ? 1 / Math.abs(cos) : 1;
+
+  let x = p[0] - (isNormal ? 0 : origin[0]);
+  let y = p[1] - (isNormal ? 0 : origin[1]);
+  let z = p[2] - (isNormal ? 0 : origin[2]);
+
+  if (axis === "x") {
+    const ny = y * cos - z * sin;
+    const nz = y * sin + z * cos;
+    y = ny * invCos;
+    z = nz * invCos;
+  } else if (axis === "y") {
+    const nx = x * cos + z * sin;
+    const nz = -x * sin + z * cos;
+    x = nx * invCos;
+    z = nz * invCos;
+  } else {
+    const nx = x * cos - y * sin;
+    const ny = x * sin + y * cos;
+    x = nx * invCos;
+    y = ny * invCos;
+  }
+
+  return [
+    x + (isNormal ? 0 : origin[0]),
+    y + (isNormal ? 0 : origin[1]),
+    z + (isNormal ? 0 : origin[2]),
+  ];
+}
+
+function applyElementRotation(
+  p: [number, number, number],
+  rot: ResolvedModelElementRotation,
+  isNormal: boolean
+): [number, number, number] {
+  let out = p;
+  if (rot.axis && typeof rot.angle === "number") {
+    out = rotatePointAroundAxis(out, rot.origin, rot.axis, rot.angle, Boolean(rot.rescale), isNormal);
+  } else {
+    if (typeof rot.x === "number" && rot.x !== 0) {
+      out = rotatePointAroundAxis(out, rot.origin, "x", rot.x, Boolean(rot.rescale), isNormal);
+    }
+    if (typeof rot.y === "number" && rot.y !== 0) {
+      out = rotatePointAroundAxis(out, rot.origin, "y", rot.y, Boolean(rot.rescale), isNormal);
+    }
+    if (typeof rot.z === "number" && rot.z !== 0) {
+      out = rotatePointAroundAxis(out, rot.origin, "z", rot.z, Boolean(rot.rescale), isNormal);
+    }
+  }
+  if (isNormal) {
+    const len = Math.hypot(out[0], out[1], out[2]) || 1;
+    return [out[0] / len, out[1] / len, out[2] / len];
+  }
+  return out;
+}
+
+function applyBlockstateRotation(
+  p: [number, number, number],
+  stepsX: number,
+  stepsY: number,
+  translateCenter: boolean
+): [number, number, number] {
+  let x = p[0] - (translateCenter ? 8 : 0);
+  let y = p[1] - (translateCenter ? 8 : 0);
+  let z = p[2] - (translateCenter ? 8 : 0);
+
+  for (let i = 0; i < stepsX; i++) {
+    const ny = z;
+    const nz = -y;
+    y = ny;
+    z = nz;
+  }
+
+  for (let i = 0; i < stepsY; i++) {
+    const nx = -z;
+    const nz = x;
+    x = nx;
+    z = nz;
+  }
+
+  return [
+    x + (translateCenter ? 8 : 0),
+    y + (translateCenter ? 8 : 0),
+    z + (translateCenter ? 8 : 0),
+  ];
+}
+
+function vectorToFaceDirection(n: [number, number, number]): McFaceDirection {
+  const ax = Math.abs(n[0]);
+  const ay = Math.abs(n[1]);
+  const az = Math.abs(n[2]);
+  if (ay >= ax && ay >= az) {
+    return n[1] >= 0 ? "up" : "down";
+  }
+  if (az >= ax && az >= ay) {
+    return n[2] >= 0 ? "south" : "north";
+  }
+  return n[0] >= 0 ? "east" : "west";
+}
+
+function computeBoxLockedUv(
+  faceDir: McFaceDirection,
+  lx: number,
+  ly: number,
+  lz: number
+): [number, number] {
+  switch (faceDir) {
+    case "up":
+      return [lx, 1 - lz];
+    case "down":
+      return [lx, lz];
+    case "north":
+      return [1 - lx, ly];
+    case "south":
+      return [lx, ly];
+    case "east":
+      return [1 - lz, ly];
+    case "west":
+      return [lz, ly];
+  }
+}
+
+function computeShadeFactor(n: [number, number, number]): number {
+  if (n[1] > 0.5) return 1.0;
+  if (n[1] < -0.5) return 0.55;
+  if (Math.abs(n[2]) >= Math.abs(n[0])) return 0.88;
+  return 0.74;
+}
+
+function isCoplanarWithPreviousElement(
+  elements: ResolvedModelElement[],
+  idx: number
+): boolean {
+  const cur = elements[idx];
+  if (cur.rotation) return false;
+  for (let i = 0; i < idx; i++) {
+    const prev = elements[i];
+    if (prev.rotation) continue;
+    if (
+      prev.from[0] === cur.from[0] &&
+      prev.from[1] === cur.from[1] &&
+      prev.from[2] === cur.from[2] &&
+      prev.to[0] === cur.to[0] &&
+      prev.to[1] === cur.to[1] &&
+      prev.to[2] === cur.to[2]
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function isInstanceFullOpaqueCube(
   voxel: VoxelData,
-  positions: number[],
-  normals: number[],
-  uvs: number[],
-  colors: number[],
-  indices: number[],
-  pickBytes?: number[]
-): void {
-  const posAttr = unitBoxTemplate.attributes.position;
-  const normAttr = unitBoxTemplate.attributes.normal;
-  const uvAttr = unitBoxTemplate.attributes.uv;
-  const indexAttr = unitBoxTemplate.index!;
+  def: CompiledBlockDefinition,
+  voxelMap: Map<string, VoxelData>,
+  blockModels?: Record<string, CompiledBlockDefinition>
+): boolean {
+  if (def.isFullOpaqueCube) return true;
+  if (def.isFluid || def.isTranslucent || !def.variants) return false;
 
-  const baseVertex = positions.length / 3;
+  const refs = resolveActiveModelParts(voxel, def, voxelMap, blockModels);
+  if (refs.length !== 1) return false;
+  const elements = def.models[refs[0].model];
+  if (!elements || elements.length === 0) return false;
 
-  const rByte = Math.max(0, Math.min(255, Math.round(voxel.x)));
-  const gByte = Math.max(0, Math.min(255, Math.round(voxel.y)));
-  const bByte = Math.max(0, Math.min(255, Math.round(voxel.z)));
-  const aByte = Math.max(0, Math.min(255, Math.round(voxel.opId ?? 0)));
-
-  for (let i = 0; i < posAttr.count; i++) {
-    const vx = posAttr.getX(i) * part.sx + part.cx;
-    const vy = posAttr.getY(i) * part.sy + part.cy;
-    const vz = posAttr.getZ(i) * part.sz + part.cz;
-    positions.push(vx, vy, vz);
-
-    const nx = normAttr.getX(i);
-    const ny = normAttr.getY(i);
-    const nz = normAttr.getZ(i);
-    normals.push(nx, ny, nz);
-
-    const u = uvAttr.getX(i);
-    const v = uvAttr.getY(i);
-    uvs.push(u, v);
-
-    // Baked directional face shading + subtle ambient occlusion so block shapes & depth pop clearly
-    let shade = 1.0;
-    if (ny > 0.5) {
-      shade = 1.0;
-    } else if (ny < -0.5) {
-      shade = 0.58;
-    } else if ( Math.abs(nz) > 0.5) {
-      shade = nz > 0 ? 0.88 : 0.82;
-    } else {
-      shade = nx > 0 ? 0.76 : 0.72;
-    }
-
-    // Subtle vertex AO at lower corners of each box
-    const localY = posAttr.getY(i);
-    if (localY < 0 && Math.abs(ny) < 0.5) {
-      shade *= 0.93;
-    }
-
-    colors.push(shade, shade, shade);
-
-    if (pickBytes) {
-      pickBytes.push(rByte, gByte, bByte, aByte);
+  const covered = new Set<McFaceDirection>();
+  for (const el of elements) {
+    if (el.rotation) continue;
+    if (
+      el.from[0] === 0 &&
+      el.from[1] === 0 &&
+      el.from[2] === 0 &&
+      el.to[0] === 16 &&
+      el.to[1] === 16 &&
+      el.to[2] === 16
+    ) {
+      for (const dir of ALL_DIRS) {
+        if (el.faces[dir]) covered.add(dir);
+      }
     }
   }
+  return ALL_DIRS.every((d) => covered.has(d));
+}
 
-  for (let i = 0; i < indexAttr.count; i++) {
-    indices.push(baseVertex + indexAttr.getX(i));
+function shouldCullFace(
+  cullDir: McFaceDirection | undefined,
+  voxel: VoxelData,
+  def: CompiledBlockDefinition,
+  voxelMap: Map<string, VoxelData>,
+  blockModels?: Record<string, CompiledBlockDefinition>
+): boolean {
+  if (!cullDir) return false;
+  const [dx, dy, dz] = DIR_VECTORS[cullDir];
+  const neighbor = voxelMap.get(`${voxel.x + dx},${voxel.y + dy},${voxel.z + dz}`);
+  if (!neighbor) return false;
+
+  const nDef = getBlockDef(neighbor.name, blockModels);
+
+  if (def.isFluid) {
+    if (nDef.isFluid) return true;
+    return isInstanceFullOpaqueCube(neighbor, nDef, voxelMap, blockModels);
   }
+
+  if (nDef.isFluid) {
+    return false;
+  }
+
+  if (isInstanceFullOpaqueCube(neighbor, nDef, voxelMap, blockModels)) {
+    return true;
+  }
+
+  if (nDef.isTranslucent && nDef.blockName === def.blockName) {
+    return true;
+  }
+
+  return false;
+}
+
+interface TextureBucketArrays {
+  positions: number[];
+  normals: number[];
+  uvs: number[];
+  colors: number[];
+  indices: number[];
+}
+
+function getOrCreateBucket(
+  buckets: Map<string, TextureBucketArrays>,
+  textureKey: string
+): TextureBucketArrays {
+  let b = buckets.get(textureKey);
+  if (!b) {
+    b = { positions: [], normals: [], uvs: [], colors: [], indices: [] };
+    buckets.set(textureKey, b);
+  }
+  return b;
 }
 
 /**
- * Builds both the Visual Group (textured + shaded meshes + crisp dark edge lines)
- * and the Data Picking BufferGeometry (with exact normalized RGBA byte attribute `aPickColor`).
+ * Builds both the Visual Group (data-driven blockstates/models + crisp edges)
+ * and the Data Picking BufferGeometry (`aPickColor`).
  */
 export async function buildWorldMeshes(
   voxels: VoxelData[],
   worldSize: [number, number, number],
-  textures?: Record<string, string>
+  textures?: Record<string, string>,
+  blockModels?: Record<string, CompiledBlockDefinition>
 ): Promise<BuiltWorldMeshes> {
   const visualGroup = new THREE.Group();
   visualGroup.name = "VoxelVisualGroup";
 
-  // Group voxels by block name for batched visual meshes
-  const byBlock = new Map<string, VoxelData[]>();
+  const voxelMap = new Map<string, VoxelData>();
   for (const v of voxels) {
-    const list = byBlock.get(v.name);
-    if (list) {
-      list.push(v);
-    } else {
-      byBlock.set(v.name, [v]);
-    }
+    voxelMap.set(`${v.x},${v.y},${v.z}`, v);
   }
 
-  // Arrays for unified Data Picking geometry
   const pickPositions: number[] = [];
-  const pickNormals: number[] = [];
-  const pickUvs: number[] = [];
-  const pickColors: number[] = [];
   const pickIndices: number[] = [];
   const pickBytes: number[] = [];
 
-  // Bounds calculation
+  const edgePositions: number[] = [];
+  const edgeIndices: number[] = [];
+
+  const textureBuckets = new Map<string, TextureBucketArrays>();
+  const textureFallbackBlock = new Map<string, string>();
+
   let minX = Infinity,
     minY = Infinity,
     minZ = Infinity;
@@ -345,79 +996,218 @@ export async function buildWorldMeshes(
     maxY = -Infinity,
     maxZ = -Infinity;
 
-  const edgeGeometries: THREE.BufferGeometry[] = [];
+  const quadIndexPattern = [0, 1, 2, 0, 2, 3];
 
-  for (const [blockName, blockVoxels] of byBlock.entries()) {
-    const texture = await resolveBlockTexture(blockName, textures);
-    const shortName = normalizeBlockName(blockName);
-    const isGlassOrWater = shortName.includes("glass") || shortName.includes("water");
+  for (const voxel of voxels) {
+    if (voxel.x < minX) minX = voxel.x;
+    if (voxel.y < minY) minY = voxel.y;
+    if (voxel.z < minZ) minZ = voxel.z;
+    if (voxel.x + 1 > maxX) maxX = voxel.x + 1;
+    if (voxel.y + 1 > maxY) maxY = voxel.y + 1;
+    if (voxel.z + 1 > maxZ) maxZ = voxel.z + 1;
 
-    const positions: number[] = [];
-    const normals: number[] = [];
-    const uvs: number[] = [];
-    const colors: number[] = [];
-    const indices: number[] = [];
+    const def = getBlockDef(voxel.name, blockModels);
+    const activeParts = resolveActiveModelParts(voxel, def, voxelMap, blockModels);
 
-    for (const voxel of blockVoxels) {
-      if (voxel.x < minX) minX = voxel.x;
-      if (voxel.y < minY) minY = voxel.y;
-      if (voxel.z < minZ) minZ = voxel.z;
-      if (voxel.x + 1 > maxX) maxX = voxel.x + 1;
-      if (voxel.y + 1 > maxY) maxY = voxel.y + 1;
-      if (voxel.z + 1 > maxZ) maxZ = voxel.z + 1;
+    const rByte = Math.max(0, Math.min(255, voxel.x));
+    const gByte = Math.max(0, Math.min(255, voxel.y));
+    const bByte = Math.max(0, Math.min(255, voxel.z));
+    const aByte = Math.max(0, Math.min(255, voxel.opId ?? 0));
 
-      const parts = getVoxelBoxes(voxel);
-      for (const part of parts) {
-        appendBoxToArrays(part, voxel, positions, normals, uvs, colors, indices);
-        appendBoxToArrays(
-          part,
-          voxel,
-          pickPositions,
-          pickNormals,
-          pickUvs,
-          pickColors,
-          pickIndices,
-          pickBytes
-        );
+    for (const partRef of activeParts) {
+      const elements = def.models[partRef.model];
+      if (!elements || elements.length === 0) continue;
+
+      const stepsX = (((partRef.x ?? 0) / 90) % 4 + 4) % 4;
+      const stepsY = (((partRef.y ?? 0) / 90) % 4 + 4) % 4;
+      const applyUvLock = Boolean(partRef.uvlock) && (stepsX !== 0 || stepsY !== 0);
+
+      for (let elemIdx = 0; elemIdx < elements.length; elemIdx++) {
+        const el = elements[elemIdx];
+        const isOverlay = isCoplanarWithPreviousElement(elements, elemIdx);
+        const overlayOffset = isOverlay ? elemIdx * 0.001 : 0;
+        const isZeroThickness =
+          el.from[0] === el.to[0] || el.from[1] === el.to[1] || el.from[2] === el.to[2];
+        const addEdges =
+          !def.isFluid &&
+          !def.isTranslucent &&
+          !el.rotation &&
+          !isZeroThickness &&
+          !isOverlay;
+
+        for (const dir of ALL_DIRS) {
+          const faceDef = el.faces[dir];
+          if (!faceDef) continue;
+
+          // Compute rotated cullface direction
+          let rotatedCullDir: McFaceDirection | undefined;
+          if (faceDef.cullface) {
+            const cullVec = applyBlockstateRotation(
+              DIR_VECTORS[faceDef.cullface],
+              stepsX,
+              stepsY,
+              false
+            );
+            rotatedCullDir = vectorToFaceDirection(cullVec);
+          }
+
+          if (shouldCullFace(rotatedCullDir, voxel, def, voxelMap, blockModels)) {
+            continue;
+          }
+
+          const { corners, normal } = getUnrotatedFaceCorners(dir, el.from, el.to);
+          const rawUv = faceDef.uv ?? getDefaultFaceUv(dir, el.from, el.to);
+          const [u1, v1, u2, v2] = rawUv;
+          const baseUvs: [number, number][] = [
+            [u1 / 16, 1 - v1 / 16],
+            [u1 / 16, 1 - v2 / 16],
+            [u2 / 16, 1 - v2 / 16],
+            [u2 / 16, 1 - v1 / 16],
+          ];
+          const rotSteps = (((faceDef.rotation ?? 0) / 90) % 4 + 4) % 4;
+
+          let rotNormal = normal;
+          if (el.rotation) {
+            rotNormal = applyElementRotation(rotNormal, el.rotation, true);
+          }
+          rotNormal = applyBlockstateRotation(rotNormal, stepsX, stepsY, false);
+          const rotFaceDir = vectorToFaceDirection(rotNormal);
+          const shade = computeShadeFactor(rotNormal);
+
+          const worldCorners: [number, number, number][] = [];
+          const cornerUvs: [number, number][] = [];
+
+          for (let ci = 0; ci < 4; ci++) {
+            let pt = corners[ci];
+            if (el.rotation) {
+              pt = applyElementRotation(pt, el.rotation, false);
+            }
+            pt = applyBlockstateRotation(pt, stepsX, stepsY, true);
+
+            const lx = pt[0] / 16;
+            const ly = pt[1] / 16;
+            const lz = pt[2] / 16;
+
+            worldCorners.push([
+              voxel.x + lx + rotNormal[0] * overlayOffset,
+              voxel.y + ly + rotNormal[1] * overlayOffset,
+              voxel.z + lz + rotNormal[2] * overlayOffset,
+            ]);
+
+            if (applyUvLock && !el.rotation) {
+              cornerUvs.push(computeBoxLockedUv(rotFaceDir, lx, ly, lz));
+            } else {
+              cornerUvs.push(baseUvs[(ci + rotSteps) % 4]);
+            }
+          }
+
+          const bucket = getOrCreateBucket(textureBuckets, faceDef.textureKey);
+          if (!textureFallbackBlock.has(faceDef.textureKey)) {
+            textureFallbackBlock.set(faceDef.textureKey, def.blockName);
+          }
+
+          const bucketVertBase = bucket.positions.length / 3;
+          for (let ci = 0; ci < 4; ci++) {
+            bucket.positions.push(
+              worldCorners[ci][0],
+              worldCorners[ci][1],
+              worldCorners[ci][2]
+            );
+            bucket.normals.push(rotNormal[0], rotNormal[1], rotNormal[2]);
+            bucket.uvs.push(cornerUvs[ci][0], cornerUvs[ci][1]);
+            bucket.colors.push(shade, shade, shade);
+          }
+          for (const idxOffset of quadIndexPattern) {
+            bucket.indices.push(bucketVertBase + idxOffset);
+          }
+
+          if (!isOverlay) {
+            const pickVertBase = pickPositions.length / 3;
+            for (let ci = 0; ci < 4; ci++) {
+              pickPositions.push(
+                worldCorners[ci][0],
+                worldCorners[ci][1],
+                worldCorners[ci][2]
+              );
+              pickBytes.push(rByte, gByte, bByte, aByte);
+            }
+            for (const idxOffset of quadIndexPattern) {
+              pickIndices.push(pickVertBase + idxOffset);
+            }
+          }
+
+          if (addEdges) {
+            const edgeVertBase = edgePositions.length / 3;
+            for (let ci = 0; ci < 4; ci++) {
+              edgePositions.push(
+                worldCorners[ci][0],
+                worldCorners[ci][1],
+                worldCorners[ci][2]
+              );
+            }
+            for (const idxOffset of quadIndexPattern) {
+              edgeIndices.push(edgeVertBase + idxOffset);
+            }
+          }
+        }
       }
     }
+  }
+
+  for (const [textureKey, bucket] of textureBuckets.entries()) {
+    if (bucket.positions.length === 0 || bucket.indices.length === 0) continue;
+
+    const fallbackBlock = textureFallbackBlock.get(textureKey);
+    const asset = await resolveTextureAsset(textureKey, textures, fallbackBlock);
 
     const geom = new THREE.BufferGeometry();
-    geom.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
-    geom.setAttribute("normal", new THREE.Float32BufferAttribute(normals, 3));
-    geom.setAttribute("uv", new THREE.Float32BufferAttribute(uvs, 2));
-    geom.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
-    geom.setIndex(indices);
+    geom.setAttribute("position", new THREE.Float32BufferAttribute(bucket.positions, 3));
+    geom.setAttribute("normal", new THREE.Float32BufferAttribute(bucket.normals, 3));
+    geom.setAttribute("uv", new THREE.Float32BufferAttribute(bucket.uvs, 2));
+    geom.setAttribute("color", new THREE.Float32BufferAttribute(bucket.colors, 3));
+    geom.setIndex(bucket.indices);
 
-    const mat = new THREE.MeshLambertMaterial({
-      map: texture,
+    const mat = new THREE.MeshBasicMaterial({
+      map: asset.texture,
       vertexColors: true,
-      transparent: isGlassOrWater,
-      opacity: isGlassOrWater ? 0.78 : 1.0
+      transparent: asset.isTranslucent,
+      opacity: 1.0,
+      alphaTest: asset.isTranslucent ? 0 : 0.1,
+      depthWrite: !asset.isTranslucent,
+      polygonOffset: true,
+      polygonOffsetFactor: 1,
+      polygonOffsetUnits: 1,
     });
 
     const mesh = new THREE.Mesh(geom, mat);
     mesh.castShadow = false;
     mesh.receiveShadow = false;
+    if (asset.isTranslucent) {
+      mesh.renderOrder = 2;
+    }
     visualGroup.add(mesh);
-
-    // Crisp dark edge lines so Vision LLMs and humans can clearly distinguish adjacent blocks
-    const edges = new THREE.EdgesGeometry(geom, 25);
-    edgeGeometries.push(edges);
   }
 
-  if (edgeGeometries.length > 0) {
+  if (edgePositions.length > 0 && edgeIndices.length > 0) {
+    const combinedEdgeSourceGeom = new THREE.BufferGeometry();
+    combinedEdgeSourceGeom.setAttribute(
+      "position",
+      new THREE.Float32BufferAttribute(edgePositions, 3)
+    );
+    combinedEdgeSourceGeom.setIndex(edgeIndices);
+
+    const edges = new THREE.EdgesGeometry(combinedEdgeSourceGeom, 25);
+    combinedEdgeSourceGeom.dispose();
+
     const lineMat = new THREE.LineBasicMaterial({
       color: 0x0f172a,
       transparent: true,
-      opacity: 0.36,
-      depthWrite: false
+      opacity: 0.22,
+      depthWrite: false,
     });
-    for (const eg of edgeGeometries) {
-      const lines = new THREE.LineSegments(eg, lineMat);
-      lines.renderOrder = 1;
-      visualGroup.add(lines);
-    }
+    const lines = new THREE.LineSegments(edges, lineMat);
+    lines.renderOrder = 1;
+    visualGroup.add(lines);
   }
 
   const pickerGeometry = new THREE.BufferGeometry();
@@ -445,6 +1235,6 @@ export async function buildWorldMeshes(
   return {
     visualGroup,
     pickerGeometry,
-    bounds: { min, max, center, size }
+    bounds: { min, max, center, size },
   };
 }
