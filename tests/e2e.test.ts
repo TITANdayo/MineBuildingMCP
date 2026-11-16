@@ -665,4 +665,275 @@ describe("MineBuildingMCP End-to-End Verification", () => {
     expect(pngCut.width).toBe(128);
     expect(pngCut.height).toBe(128);
   }, 45000);
+
+  it("10. Validates .mcstructure & VoxelWorld bounds, double-slab/DSL edge cases, and native Node ESM nbt-io", async () => {
+    const { spawnSync } = await import("node:child_process");
+    const nbtNs = await import("prismarine-nbt");
+    const nbt = (nbtNs as unknown as { default?: typeof nbtNs }).default ?? nbtNs;
+    const { parseMcstructureBuffer } = await import("../src/core/nbt-io.js");
+    const { VoxelWorld } = await import("../src/core/voxel-world.js");
+    const { javaToBedrockState } = await import("../src/core/state-translator.js");
+
+    // 1. VoxelWorld constructor rejects non-finite / non-positive dimensions
+    expect(() => new VoxelWorld(["bad" as unknown as number, 4, 4])).toThrow();
+    expect(() => new VoxelWorld([NaN, 4, 4])).toThrow();
+    expect(() => new VoxelWorld([0, 4, 4])).toThrow();
+
+    // 2. parseMcstructureBuffer rejects unrelated NBT compounds & non-numeric size
+    const unrelatedBuf = nbt.writeUncompressed(
+      nbt.comp({ hello: nbt.string("world") }, "") as any,
+      "little"
+    );
+    await expect(parseMcstructureBuffer(unrelatedBuf)).rejects.toThrow(/Invalid \.mcstructure/);
+
+    const badSizeBuf = nbt.writeUncompressed(
+      nbt.comp(
+        {
+          format_version: nbt.int(1),
+          size: nbt.list(nbt.string(["bad", "4", "4"])),
+          structure: nbt.comp({
+            block_indices: nbt.list(nbt.int([0])),
+            palette: nbt.comp({}),
+          }),
+        },
+        ""
+      ) as any,
+      "little"
+    );
+    await expect(parseMcstructureBuffer(badSizeBuf)).rejects.toThrow(/Invalid \.mcstructure/);
+
+    // 3. Double slab with both type="double" and half="bottom" must not attach vertical_half
+    const doubleSlab = javaToBedrockState("minecraft:oak_slab", {
+      type: "double",
+      half: "bottom",
+    });
+    expect(doubleSlab.name).toBe("minecraft:oak_double_slab");
+    expect(doubleSlab.states["minecraft:vertical_half"]).toBeUndefined();
+
+    // 4. DSL placeBed empty color fallback & furnishRoom("dining")
+    const roomWorld = new VoxelWorld([16, 12, 16]);
+    const script = [
+      'fillBox(2, 0, 2, 8, 0, 8, "stone_bricks");',
+      'buildWall(2, 2, 8, 8, 3, "oak_planks", false);',
+      'fillBox(2, 4, 2, 8, 4, 8, "stone_bricks");',
+      'placeDoor(5, 1, 2, "minecraft:oak_door", "south");',
+      'furnishRoom(1, "dining");',
+      'placeBed(4, 1, 7, "east", "");',
+    ].join("\n");
+    const execRes = executeBuildScript(roomWorld, script, true);
+    expect(execRes.evaluation.valid).toBe(true);
+    expect(roomWorld.getVoxel(4, 1, 7)?.name).toBe("minecraft:red_bed");
+    const placedNames = new Set(roomWorld.getAllVoxels().map((v) => v.name));
+    expect(placedNames.has("minecraft:spruce_fence")).toBe(true);
+    expect(placedNames.has("minecraft:spruce_stairs")).toBe(true);
+    expect(placedNames.has("minecraft:yellow_carpet")).toBe(true);
+
+    // 5. Native Node ESM check on compiled dist/core/nbt-io.js (if built)
+    const distNbtPath = path.resolve(process.cwd(), "dist/core/nbt-io.js");
+    if (fs.existsSync(distNbtPath)) {
+      const proc = spawnSync(
+        process.execPath,
+        [
+          "--input-type=module",
+          "-e",
+          'import { serializeMcstructureBuffer, parseMcstructureBuffer } from "./dist/core/nbt-io.js"; import { VoxelWorld } from "./dist/core/voxel-world.js"; const w = new VoxelWorld([4,4,4]); w.setVoxel(1,1,1,"minecraft:oak_stairs",{facing:"north"},false,1); const buf = await serializeMcstructureBuffer(w); const r = await parseMcstructureBuffer(buf); console.log(JSON.stringify({ bytes: buf.length, restored: r.getVoxel(1,1,1)?.name }));',
+        ],
+        { cwd: process.cwd(), encoding: "utf8" }
+      );
+      expect(proc.status).toBe(0);
+      const out = JSON.parse(proc.stdout.trim());
+      expect(out.bytes).toBeGreaterThan(0);
+      expect(out.restored).toBe("minecraft:oak_stairs");
+    }
+  });
+
+  it("11. Handles sparse 256^3 worlds rapidly, detects 3-high open doorways, and keeps L-shaped 2-wide corridors unified", async () => {
+    const { VoxelWorld } = await import("../src/core/voxel-world.js");
+
+    // 1. Sparse 256^3 benchmark: small room at 10..16 + distant block at 240
+    const sparseWorld = new VoxelWorld([256, 256, 256]);
+    for (let x = 10; x <= 16; x++) {
+      for (let z = 10; z <= 16; z++) {
+        sparseWorld.setVoxel(x, 10, z, "minecraft:stone_bricks", undefined, false, 1);
+        sparseWorld.setVoxel(x, 14, z, "minecraft:stone_bricks", undefined, false, 1);
+        if (x === 10 || x === 16 || z === 10 || z === 16) {
+          for (let y = 11; y <= 13; y++) {
+            sparseWorld.setVoxel(x, y, z, "minecraft:oak_planks", undefined, false, 1);
+          }
+        }
+      }
+    }
+    sparseWorld.setVoxel(13, 11, 10, "minecraft:oak_door", { facing: "south", half: "lower" }, false, 2);
+    sparseWorld.setVoxel(13, 12, 10, "minecraft:oak_door", { facing: "south", half: "upper" }, false, 2);
+    sparseWorld.setVoxel(13, 13, 13, "minecraft:lantern", { hanging: "true" }, false, 3);
+    sparseWorld.setVoxel(240, 240, 240, "minecraft:stone", undefined, false, 4);
+
+    const t0 = performance.now();
+    const sparseReport = sparseWorld.detectInteriorRooms();
+    const elapsedMs = performance.now() - t0;
+    expect(elapsedMs).toBeLessThan(500);
+    expect(sparseReport.rooms.length).toBe(1);
+    expect(sparseReport.validFlow).toBe(true);
+
+    // 2. 3-block-tall open doorway (headroom=3, floorY=2, ceilingY=4, lintel at y=5)
+    const tallDoorWorld = new VoxelWorld([16, 12, 16]);
+    for (let x = 2; x <= 8; x++) {
+      for (let z = 2; z <= 8; z++) {
+        tallDoorWorld.setVoxel(x, 1, z, "minecraft:stone_bricks", undefined, false, 1);
+        tallDoorWorld.setVoxel(x, 5, z, "minecraft:stone_bricks", undefined, false, 1);
+        if (x === 2 || x === 8 || z === 2 || z === 8) {
+          for (let y = 2; y <= 4; y++) {
+            if (x === 5 && z === 2) continue; // 3-high open doorway
+            tallDoorWorld.setVoxel(x, y, z, "minecraft:oak_planks", undefined, false, 1);
+          }
+        }
+      }
+    }
+    tallDoorWorld.setVoxel(5, 4, 5, "minecraft:lantern", { hanging: "true" }, false, 2);
+    const tallReport = tallDoorWorld.detectInteriorRooms();
+    expect(tallReport.rooms.length).toBe(1);
+    expect(tallReport.rooms[0].floorY).toBe(2);
+    expect(tallReport.rooms[0].ceilingY).toBe(4);
+    expect(tallReport.rooms[0].volume).toBe(75);
+    expect(tallReport.rooms[0].doors.some((d) => d.x === 5 && d.z === 2 && !d.blocked)).toBe(true);
+    expect(tallReport.validFlow).toBe(true);
+
+    // 3. L-shaped 2-wide headroom=2 corridor must remain 1 unified room
+    const lWorld = new VoxelWorld([28, 12, 28]);
+    const isCorridorAir = (x: number, z: number) =>
+      (x >= 11 && x <= 12 && z >= 10 && z <= 16) ||
+      (x >= 11 && x <= 18 && z >= 15 && z <= 16);
+    for (let x = 10; x <= 19; x++) {
+      for (let z = 9; z <= 17; z++) {
+        const inside = isCorridorAir(x, z);
+        const adj =
+          isCorridorAir(x + 1, z) ||
+          isCorridorAir(x - 1, z) ||
+          isCorridorAir(x, z + 1) ||
+          isCorridorAir(x, z - 1);
+        if (inside || adj) {
+          lWorld.setVoxel(x, 4, z, "minecraft:stone_bricks", undefined, false, 1);
+          lWorld.setVoxel(x, 7, z, "minecraft:stone_bricks", undefined, false, 1);
+          if (!inside) {
+            lWorld.setVoxel(x, 5, z, "minecraft:stone_bricks", undefined, false, 1);
+            lWorld.setVoxel(x, 6, z, "minecraft:stone_bricks", undefined, false, 1);
+          }
+        }
+      }
+    }
+    const lReport = lWorld.detectInteriorRooms();
+    expect(lReport.rooms.length).toBe(1);
+    expect(lReport.rooms[0].volume).toBe(52);
+  });
+
+  it("12. Fixes filterVoxelsForCutaway porch pillars/eaves/sloped foundation and avoids 16x16 PNG texture cache collisions", async () => {
+    const { filterVoxelsForCutaway } = await import("../src/viewer/voxel-mesh.js");
+    const { VoxelWorld } = await import("../src/core/voxel-world.js");
+
+    // 1. Porch pillars, 2-layer overhanging eaves, and low-slice 1-layer trim
+    const buildHouseWithExtras = () => {
+      const w = new VoxelWorld([24, 16, 24]);
+      for (let x = 10; x <= 16; x++) {
+        for (let z = 10; z <= 16; z++) {
+          w.setVoxel(x, 4, z, "minecraft:stone_bricks", undefined, false, 1);
+          w.setVoxel(x, 9, z, "minecraft:stone_bricks", undefined, false, 1);
+          if (x === 10 || x === 16 || z === 10 || z === 16) {
+            for (let y = 5; y <= 8; y++) {
+              w.setVoxel(x, y, z, "minecraft:oak_planks", undefined, false, 2);
+            }
+          }
+        }
+      }
+      w.setVoxel(13, 5, 13, "minecraft:crafting_table", undefined, false, 3);
+      return w;
+    };
+
+    // Case 1B: 2 porch pillars
+    const porchWorld = buildHouseWithExtras();
+    for (let y = 5; y <= 8; y++) {
+      porchWorld.setVoxel(11, y, 8, "minecraft:oak_log", undefined, false, 4);
+      porchWorld.setVoxel(15, y, 8, "minecraft:oak_log", undefined, false, 4);
+    }
+    const porchCut = filterVoxelsForCutaway(porchWorld.getAllVoxels(), 8, "NE");
+    expect(porchCut.some((v) => v.x === 13 && v.y === 6 && v.z === 10)).toBe(false);
+    expect(porchCut.some((v) => v.x === 13 && v.y === 5 && v.z === 13)).toBe(true);
+
+    // Case 1C: 2-layer overhanging eaves
+    const eavesWorld = buildHouseWithExtras();
+    for (let x = 9; x <= 17; x++) {
+      eavesWorld.setVoxel(x, 7, 9, "minecraft:oak_slab", { type: "top" }, false, 4);
+      eavesWorld.setVoxel(x, 8, 9, "minecraft:oak_stairs", { facing: "south" }, false, 4);
+    }
+    const eavesCut = filterVoxelsForCutaway(eavesWorld.getAllVoxels(), 8, "NE");
+    expect(eavesCut.some((v) => v.x === 13 && v.y === 6 && v.z === 10)).toBe(false);
+
+    // Case 1D: low slice cutY=5 with 1-layer slab trim
+    const trimWorld = buildHouseWithExtras();
+    for (let x = 10; x <= 16; x++) {
+      trimWorld.setVoxel(x, 5, 9, "minecraft:oak_slab", { type: "bottom" }, false, 4);
+    }
+    const trimCut = filterVoxelsForCutaway(trimWorld.getAllVoxels(), 5, "NE");
+    expect(trimCut.some((v) => v.x === 13 && v.y === 5 && v.z === 10)).toBe(false);
+
+    // Case 1E: sloped terrain with deep placeFoundation preserves floor edge (18, 14, 15)
+    const slopedWorld = await loadStructureNbt(sampleNbtPath);
+    executeBuildScript(
+      slopedWorld,
+      [
+        'placeFoundation(12, 12, 18, 18, 14, "stone_bricks");',
+        'buildWall(12, 12, 18, 18, 4, "oak_planks", false);',
+      ].join("\n"),
+      true
+    );
+    const slopedCut = filterVoxelsForCutaway(slopedWorld.getAllVoxels(), 17, "NE");
+    expect(slopedCut.some((v) => v.x === 18 && v.y === 14 && v.z === 15)).toBe(true);
+    expect(slopedCut.some((v) => v.x === 18 && v.y === 16 && v.z === 15)).toBe(false);
+
+    // 2. resolveTextureAsset cache key uniqueness across distinct 16x16 PNGs
+    const makeSolidPngUrl = (r: number, g: number, b: number): string => {
+      const png = new PNG({ width: 16, height: 16 });
+      for (let i = 0; i < png.data.length; i += 4) {
+        png.data[i] = r;
+        png.data[i + 1] = g;
+        png.data[i + 2] = b;
+        png.data[i + 3] = 255;
+      }
+      return `data:image/png;base64,${PNG.sync.write(png).toString("base64")}`;
+    };
+
+    const texWorld = new VoxelWorld([8, 8, 8]);
+    texWorld.setVoxel(3, 3, 3, "minecraft:stone_cache_probe", undefined, false, 1);
+    const loader = new JarAssetLoader();
+    const blockModels = loader.getBlockModelsForBlocks(["minecraft:stone_cache_probe"]);
+
+    const redUrl = makeSolidPngUrl(240, 20, 20);
+    const blueUrl = makeSolidPngUrl(20, 20, 240);
+    expect(redUrl.slice(0, 64)).toBe(blueUrl.slice(0, 64));
+
+    await wsBridge.syncWorld({
+      voxels: texWorld.getAllVoxels(),
+      size: texWorld.size,
+      textures: { stone_cache_probe: redUrl },
+      blockModels,
+    });
+    const redViews = await wsBridge.renderViews(128);
+    const redPng = PNG.sync.read(
+      Buffer.from(redViews.NE.replace(/^data:image\/png;base64,/, ""), "base64")
+    );
+    const redCenterIdx = (64 * 128 + 64) * 4;
+    expect(redPng.data[redCenterIdx]).toBeGreaterThan(redPng.data[redCenterIdx + 2] + 50);
+
+    await wsBridge.syncWorld({
+      voxels: texWorld.getAllVoxels(),
+      size: texWorld.size,
+      textures: { stone_cache_probe: blueUrl },
+      blockModels,
+    });
+    const blueViews = await wsBridge.renderViews(128);
+    const bluePng = PNG.sync.read(
+      Buffer.from(blueViews.NE.replace(/^data:image\/png;base64,/, ""), "base64")
+    );
+    const blueCenterIdx = (64 * 128 + 64) * 4;
+    expect(bluePng.data[blueCenterIdx + 2]).toBeGreaterThan(bluePng.data[blueCenterIdx] + 50);
+  }, 45000);
 });

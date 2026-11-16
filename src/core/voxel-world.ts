@@ -125,6 +125,17 @@ export class VoxelWorld {
   public outOfBoundsCount = 0;
 
   constructor(size: [number, number, number] = [32, 32, 32]) {
+    if (!Array.isArray(size) || size.length !== 3) {
+      throw new Error("Invalid VoxelWorld size: expected [x, y, z] tuple.");
+    }
+    for (let i = 0; i < 3; i++) {
+      const dim = size[i];
+      if (typeof dim !== "number" || !Number.isFinite(dim) || dim <= 0) {
+        throw new Error(
+          `Invalid VoxelWorld size dimension at index ${i}: ${String(dim)} (expected finite positive number).`
+        );
+      }
+    }
     this.size = [
       Math.max(1, Math.min(256, Math.floor(size[0]))),
       Math.max(1, Math.min(256, Math.floor(size[1]))),
@@ -623,9 +634,9 @@ export class VoxelWorld {
   private isWallAperture(x: number, y: number, z: number): boolean {
     if (this.voxels.has(VoxelWorld.coordKey(x, y, z))) return false;
 
-    // Must have a non-terrain lintel/header block directly above within 1..2 blocks
+    // Must have a non-terrain lintel/header block directly above within 1..3 blocks
     const hasLintelAt = (lx: number, ly: number, lz: number): boolean => {
-      for (let dy = 1; dy <= 2 && ly + dy < this.size[1]; dy++) {
+      for (let dy = 1; dy <= 3 && ly + dy < this.size[1]; dy++) {
         const above = this.voxels.get(VoxelWorld.coordKey(lx, ly + dy, lz));
         if (above && !above.isTerrain && !isInteriorFixtureBlock(above.name)) {
           return true;
@@ -697,6 +708,53 @@ export class VoxelWorld {
       return false;
     };
 
+    // Checks if an X-aligned corridor slice [lx..rx] at z is actually a 90-degree L-corridor turn
+    // rather than a doorway to outside or into a room.
+    const isCorridorCornerTurnZ = (lx: number, rx: number): boolean => {
+      const prevEnclosed = isNarrowlyEnclosedSliceZ(z - 1, lx, rx);
+      const nextEnclosed = isNarrowlyEnclosedSliceZ(z + 1, lx, rx);
+      if (prevEnclosed === nextEnclosed) return false;
+
+      const openZ = prevEnclosed ? z + 1 : z - 1;
+      const dzTurn = openZ - z;
+      if (!hasLintelAt(x, y, openZ)) return false;
+
+      const checkTurnSide = (contWallX: number, turnWallX: number): boolean => {
+        if (!isWallPillarAt(contWallX, y, openZ)) return false;
+        if (!isOpenAt(turnWallX, y, openZ)) return false;
+        if (!hasLintelAt(turnWallX, y, openZ)) return false;
+        return (
+          isWallPillarAt(turnWallX, y, openZ + dzTurn) ||
+          isWallPillarAt(turnWallX, y, openZ + 2 * dzTurn)
+        );
+      };
+
+      return checkTurnSide(lx, rx) || checkTurnSide(rx, lx);
+    };
+
+    // Checks if a Z-aligned corridor slice [lz..rz] at x is actually a 90-degree L-corridor turn.
+    const isCorridorCornerTurnX = (lz: number, rz: number): boolean => {
+      const prevEnclosed = isNarrowlyEnclosedSliceX(x - 1, lz, rz);
+      const nextEnclosed = isNarrowlyEnclosedSliceX(x + 1, lz, rz);
+      if (prevEnclosed === nextEnclosed) return false;
+
+      const openX = prevEnclosed ? x + 1 : x - 1;
+      const dxTurn = openX - x;
+      if (!hasLintelAt(openX, y, z)) return false;
+
+      const checkTurnSide = (contWallZ: number, turnWallZ: number): boolean => {
+        if (!isWallPillarAt(openX, y, contWallZ)) return false;
+        if (!isOpenAt(openX, y, turnWallZ)) return false;
+        if (!hasLintelAt(openX, y, turnWallZ)) return false;
+        return (
+          isWallPillarAt(openX + dxTurn, y, turnWallZ) ||
+          isWallPillarAt(openX + 2 * dxTurn, y, turnWallZ)
+        );
+      };
+
+      return checkTurnSide(lz, rz) || checkTurnSide(rz, lz);
+    };
+
     // Check 1-wide or 2-wide opening in an X-aligned wall (wall along X, passage along Z)
     const openZ = isOpenAt(x, y, z - 1) && isOpenAt(x, y, z + 1);
     if (openZ) {
@@ -706,7 +764,8 @@ export class VoxelWorld {
         !(
           isNarrowlyEnclosedSliceZ(z - 1, x - 1, x + 1) &&
           isNarrowlyEnclosedSliceZ(z + 1, x - 1, x + 1)
-        );
+        ) &&
+        !isCorridorCornerTurnZ(x - 1, x + 1);
       const wall2XLeft =
         isWallPillarAt(x - 1, y, z) &&
         isOpenAt(x + 1, y, z) &&
@@ -714,7 +773,8 @@ export class VoxelWorld {
         !(
           isNarrowlyEnclosedSliceZ(z - 1, x - 1, x + 2) &&
           isNarrowlyEnclosedSliceZ(z + 1, x - 1, x + 2)
-        );
+        ) &&
+        !isCorridorCornerTurnZ(x - 1, x + 2);
       const wall2XRight =
         isWallPillarAt(x - 2, y, z) &&
         isOpenAt(x - 1, y, z) &&
@@ -722,7 +782,8 @@ export class VoxelWorld {
         !(
           isNarrowlyEnclosedSliceZ(z - 1, x - 2, x + 1) &&
           isNarrowlyEnclosedSliceZ(z + 1, x - 2, x + 1)
-        );
+        ) &&
+        !isCorridorCornerTurnZ(x - 2, x + 1);
       if (wall1X || wall2XLeft || wall2XRight) return true;
     }
 
@@ -735,7 +796,8 @@ export class VoxelWorld {
         !(
           isNarrowlyEnclosedSliceX(x - 1, z - 1, z + 1) &&
           isNarrowlyEnclosedSliceX(x + 1, z - 1, z + 1)
-        );
+        ) &&
+        !isCorridorCornerTurnX(z - 1, z + 1);
       const wall2ZNorth =
         isWallPillarAt(x, y, z - 1) &&
         isOpenAt(x, y, z + 1) &&
@@ -743,7 +805,8 @@ export class VoxelWorld {
         !(
           isNarrowlyEnclosedSliceX(x - 1, z - 1, z + 2) &&
           isNarrowlyEnclosedSliceX(x + 1, z - 1, z + 2)
-        );
+        ) &&
+        !isCorridorCornerTurnX(z - 1, z + 2);
       const wall2ZSouth =
         isWallPillarAt(x, y, z - 2) &&
         isOpenAt(x, y, z - 1) &&
@@ -751,7 +814,8 @@ export class VoxelWorld {
         !(
           isNarrowlyEnclosedSliceX(x - 1, z - 2, z + 1) &&
           isNarrowlyEnclosedSliceX(x + 1, z - 2, z + 1)
-        );
+        ) &&
+        !isCorridorCornerTurnX(z - 2, z + 1);
       if (wall1Z || wall2ZNorth || wall2ZSouth) return true;
     }
 
@@ -865,8 +929,11 @@ export class VoxelWorld {
     let minBuildZ = sizeZ;
     let maxBuildZ = -1;
 
+    const nonTerrainVoxels: VoxelData[] = [];
+
     for (const voxel of this.voxels.values()) {
       if (!voxel.isTerrain) {
+        nonTerrainVoxels.push(voxel);
         if (voxel.x < minBuildX) minBuildX = voxel.x;
         if (voxel.x > maxBuildX) maxBuildX = voxel.x;
         if (voxel.y < minBuildY) minBuildY = voxel.y;
@@ -899,15 +966,58 @@ export class VoxelWorld {
       return !isInteriorFixtureBlock(v.name);
     };
 
-    // Precompute wall apertures inside the build bounding box
-    const apertureKeys = new Set<string>();
-    for (let y = Math.max(0, minBuildY); y <= Math.min(sizeY - 1, maxBuildY); y++) {
-      for (let x = Math.max(0, minBuildX); x <= Math.min(sizeX - 1, maxBuildX); x++) {
-        for (let z = Math.max(0, minBuildZ); z <= Math.min(sizeZ - 1, maxBuildZ); z++) {
-          if (this.isWallAperture(x, y, z)) {
-            apertureKeys.add(VoxelWorld.coordKey(x, y, z));
+    // Index only cells that have a non-terrain lintel (dy in 1..3) or potential ceiling (dy in 1..16)
+    // so sparse builds on large 256^3 worlds avoid O(span^3) scans over empty sky.
+    const clampedMinBuildY = Math.max(0, minBuildY);
+    const clampedMaxBuildY = Math.min(sizeY - 1, maxBuildY);
+    const clampedMinBuildX = Math.max(0, minBuildX);
+    const clampedMaxBuildX = Math.min(sizeX - 1, maxBuildX);
+    const clampedMinBuildZ = Math.max(0, minBuildZ);
+    const clampedMaxBuildZ = Math.min(sizeZ - 1, maxBuildZ);
+
+    const lintelCandidates = new Map<string, [number, number, number]>();
+    const roofedColsByY = new Map<number, Map<string, [number, number]>>();
+
+    for (const v of nonTerrainVoxels) {
+      if (isInteriorFixtureBlock(v.name)) continue;
+
+      for (let dy = 1; dy <= 3; dy++) {
+        const cy = v.y - dy;
+        if (cy < clampedMinBuildY || cy > clampedMaxBuildY) continue;
+        const cKey = VoxelWorld.coordKey(v.x, cy, v.z);
+        if (!lintelCandidates.has(cKey)) {
+          lintelCandidates.set(cKey, [v.x, cy, v.z]);
+        }
+      }
+
+      if (!isDoorBlockName(v.name)) {
+        const colKey = `${v.x},${v.z}`;
+        for (let dy = 1; dy <= 16; dy++) {
+          const cy = v.y - dy;
+          if (cy < clampedMinBuildY || cy > clampedMaxBuildY) continue;
+          let cols = roofedColsByY.get(cy);
+          if (!cols) {
+            cols = new Map<string, [number, number]>();
+            roofedColsByY.set(cy, cols);
+          }
+          if (!cols.has(colKey)) {
+            cols.set(colKey, [v.x, v.z]);
           }
         }
+      }
+    }
+
+    // Precompute wall apertures among cells with a non-terrain lintel above them
+    const apertureKeys = new Set<string>();
+    for (const [key, [x, y, z]] of lintelCandidates.entries()) {
+      if (
+        x >= clampedMinBuildX &&
+        x <= clampedMaxBuildX &&
+        z >= clampedMinBuildZ &&
+        z <= clampedMaxBuildZ &&
+        this.isWallAperture(x, y, z)
+      ) {
+        apertureKeys.add(key);
       }
     }
 
@@ -974,9 +1084,10 @@ export class VoxelWorld {
       return -1;
     };
 
-    // Outside-air flood fill per horizontal slice y in [minBuildY..maxBuildY]
-    // Any cell without a non-terrain ceiling above it OR on the world boundary is seeded as outside air.
-    // Flood-fill cannot pass through structural solid blocks (including doors/windows) or wall apertures.
+    // Outside-air flood fill per horizontal slice y over roofed columns only.
+    // Any cell without a roofed column (not solid and not an aperture) is implicitly outside air,
+    // so seeding roofed cells adjacent to unroofed/edge outside air and flooding within roofedCols
+    // gives identical interior air isolation in O(roofed_cells) instead of O(span^3).
     const outsideAirKeys = new Set<string>();
     const cardinals2D: Array<[number, number]> = [
       [1, 0],
@@ -990,19 +1101,43 @@ export class VoxelWorld {
     const scanMinZ = Math.max(0, minBuildZ - 1);
     const scanMaxZ = Math.min(sizeZ - 1, maxBuildZ + 1);
 
-    for (let y = Math.max(0, minBuildY); y <= Math.min(sizeY - 1, maxBuildY); y++) {
+    for (let y = clampedMinBuildY; y <= clampedMaxBuildY; y++) {
+      const roofedCols = roofedColsByY.get(y);
+      if (!roofedCols || roofedCols.size === 0) continue;
+
       const queue: Array<[number, number]> = [];
-      for (let x = scanMinX; x <= scanMaxX; x++) {
-        for (let z = scanMinZ; z <= scanMaxZ; z++) {
-          const key = VoxelWorld.coordKey(x, y, z);
-          if (isStructuralSolid(x, y, z) || apertureKeys.has(key)) continue;
-          const onEdge =
-            x === scanMinX || x === scanMaxX || z === scanMinZ || z === scanMaxZ;
-          const hasRoof = findCeilingBlockY(x, y, z) >= 0;
-          if (onEdge || !hasRoof) {
-            outsideAirKeys.add(key);
-            queue.push([x, z]);
+      for (const [x, z] of roofedCols.values()) {
+        if (x < scanMinX || x > scanMaxX || z < scanMinZ || z > scanMaxZ) {
+          continue;
+        }
+        const key = VoxelWorld.coordKey(x, y, z);
+        if (isStructuralSolid(x, y, z) || apertureKeys.has(key)) continue;
+
+        const onEdge =
+          x === scanMinX || x === scanMaxX || z === scanMinZ || z === scanMaxZ;
+        let touchesOutsideAir = onEdge || findCeilingBlockY(x, y, z) < 0;
+
+        if (!touchesOutsideAir) {
+          for (const [dx, dz] of cardinals2D) {
+            const nx = x + dx;
+            const nz = z + dz;
+            if (nx < scanMinX || nx > scanMaxX || nz < scanMinZ || nz > scanMaxZ) {
+              touchesOutsideAir = true;
+              break;
+            }
+            if (!roofedCols.has(`${nx},${nz}`)) {
+              const nKey = VoxelWorld.coordKey(nx, y, nz);
+              if (!isStructuralSolid(nx, y, nz) && !apertureKeys.has(nKey)) {
+                touchesOutsideAir = true;
+                break;
+              }
+            }
           }
+        }
+
+        if (touchesOutsideAir) {
+          outsideAirKeys.add(key);
+          queue.push([x, z]);
         }
       }
 
@@ -1013,6 +1148,7 @@ export class VoxelWorld {
           const nx = cx + dx;
           const nz = cz + dz;
           if (nx < scanMinX || nx > scanMaxX || nz < scanMinZ || nz > scanMaxZ) continue;
+          if (!roofedCols.has(`${nx},${nz}`)) continue;
           const nKey = VoxelWorld.coordKey(nx, y, nz);
           if (
             outsideAirKeys.has(nKey) ||
@@ -1087,38 +1223,48 @@ export class VoxelWorld {
     }
 
     const interiorMap = new Map<string, InteriorCellInfo>();
+    const minIntY = Math.max(1, minBuildY);
+    const maxIntY = Math.min(sizeY - 2, maxBuildY);
+    const minIntX = Math.max(1, minBuildX);
+    const maxIntX = Math.min(sizeX - 2, maxBuildX);
+    const minIntZ = Math.max(1, minBuildZ);
+    const maxIntZ = Math.min(sizeZ - 2, maxBuildZ);
 
-    for (let y = Math.max(1, minBuildY); y <= Math.min(sizeY - 2, maxBuildY); y++) {
-      for (let x = Math.max(1, minBuildX); x <= Math.min(sizeX - 2, maxBuildX); x++) {
-        for (let z = Math.max(1, minBuildZ); z <= Math.min(sizeZ - 2, maxBuildZ); z++) {
-          const key = VoxelWorld.coordKey(x, y, z);
-          const v = this.voxels.get(key);
-          if (
-            (v &&
-              !isInteriorFixtureBlock(v.name) &&
-              !isLikelyStandaloneFurniture(x, y, z, v)) ||
-            apertureKeys.has(key) ||
-            outsideAirKeys.has(key)
-          ) {
-            continue;
-          }
+    for (let y = minIntY; y <= maxIntY; y++) {
+      const roofedCols = roofedColsByY.get(y);
+      if (!roofedCols || roofedCols.size === 0) continue;
 
-          const floorBlockY = findFloorBlockY(x, y, z);
-          if (floorBlockY < 0) continue;
-          const ceilingBlockY = findCeilingBlockY(x, y, z);
-          if (ceilingBlockY < 0) continue;
-
-          const enclosedDirs = countEnclosedDirections(x, y, z);
-          if (enclosedDirs < 3) continue;
-
-          interiorMap.set(key, {
-            x,
-            y,
-            z,
-            floorY: floorBlockY + 1,
-            ceilingY: ceilingBlockY - 1,
-          });
+      for (const [x, z] of roofedCols.values()) {
+        if (x < minIntX || x > maxIntX || z < minIntZ || z > maxIntZ) {
+          continue;
         }
+        const key = VoxelWorld.coordKey(x, y, z);
+        const v = this.voxels.get(key);
+        if (
+          (v &&
+            !isInteriorFixtureBlock(v.name) &&
+            !isLikelyStandaloneFurniture(x, y, z, v)) ||
+          apertureKeys.has(key) ||
+          outsideAirKeys.has(key)
+        ) {
+          continue;
+        }
+
+        const floorBlockY = findFloorBlockY(x, y, z);
+        if (floorBlockY < 0) continue;
+        const ceilingBlockY = findCeilingBlockY(x, y, z);
+        if (ceilingBlockY < 0) continue;
+
+        const enclosedDirs = countEnclosedDirections(x, y, z);
+        if (enclosedDirs < 3) continue;
+
+        interiorMap.set(key, {
+          x,
+          y,
+          z,
+          floorY: floorBlockY + 1,
+          ceilingY: ceilingBlockY - 1,
+        });
       }
     }
 

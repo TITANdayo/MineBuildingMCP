@@ -134,7 +134,7 @@ async function resolveTextureAsset(
     textures?.[`minecraft:${shortFallback}`];
 
   const cacheKey = dataUrl
-    ? `tex:${shortKey}:${dataUrl.slice(0, 64)}`
+    ? `tex:${shortKey}:${dataUrl}`
     : `proc:${shortKey}:${shortFallback}`;
 
   const existing = textureAssetCache.get(cacheKey);
@@ -1276,30 +1276,111 @@ export function filterVoxelsForCutaway(
   view?: ViewDirection
 ): VoxelData[] {
   let minBY = Infinity;
-  for (const v of voxels) {
-    if (!v.isTerrain && v.y < minBY) {
-      minBY = v.y;
-    }
-  }
+  const nonTerrainCoords = new Set<string>();
+  const structuralByY = new Map<number, VoxelData[]>();
 
-  // Group non-terrain structural blocks in (minBY, cutY] by (x, z) column
-  const colHeights = new Map<string, { x: number; z: number; count: number }>();
   for (const v of voxels) {
-    if (!v.isTerrain && v.y > minBY && v.y <= cutY && !isCutawayExteriorProp(v.name)) {
-      const key = `${v.x},${v.z}`;
-      const cur = colHeights.get(key);
-      if (cur) {
-        cur.count++;
-      } else {
-        colHeights.set(key, { x: v.x, z: v.z, count: 1 });
+    if (!v.isTerrain) {
+      if (v.y < minBY) {
+        minBY = v.y;
+      }
+      nonTerrainCoords.add(`${v.x},${v.y},${v.z}`);
+      if (!isCutawayExteriorProp(v.name) && v.y <= cutY) {
+        let list = structuralByY.get(v.y);
+        if (!list) {
+          list = [];
+          structuralByY.set(v.y, list);
+        }
+        list.push(v);
       }
     }
   }
 
-  const allCols = Array.from(colHeights.values());
-  const tallCols =
-    cutY - minBY >= 2 ? allCols.filter((c) => c.count >= 2) : allCols;
-  const candidateCols = tallCols.length > 0 ? tallCols : allCols;
+  // Detect the main floor slab Y level below cutY so deep sloped foundations and floor rims are preserved.
+  // A floor level has interior blocks with air directly above (at y + 1) and structural walls above it.
+  let peelBaseY = minBY;
+  const yFloorStats: Array<{ y: number; coveredByAir: number; total: number }> = [];
+  let maxCoveredByAir = 0;
+
+  for (const [y, list] of structuralByY.entries()) {
+    if (y >= cutY) continue;
+    let coveredByAir = 0;
+    for (const v of list) {
+      if (!nonTerrainCoords.has(`${v.x},${v.y + 1},${v.z}`)) {
+        coveredByAir++;
+      }
+    }
+    if (coveredByAir > maxCoveredByAir) {
+      maxCoveredByAir = coveredByAir;
+    }
+    yFloorStats.push({ y, coveredByAir, total: list.length });
+  }
+
+  if (maxCoveredByAir >= 4) {
+    const threshold = Math.max(4, maxCoveredByAir * 0.5);
+    yFloorStats.sort((a, b) => a.y - b.y);
+    for (const stat of yFloorStats) {
+      if (stat.coveredByAir >= threshold && stat.total >= 9) {
+        peelBaseY = stat.y;
+        break;
+      }
+    }
+  }
+
+  // Group non-terrain structural blocks above peelBaseY by (x, z) column (inspecting full height in voxels)
+  interface ColInfo {
+    x: number;
+    z: number;
+    belowCutCount: number;
+    fullCount: number;
+    hasBase1: boolean;
+    hasBase2: boolean;
+  }
+
+  const colMap = new Map<string, ColInfo>();
+  for (const v of voxels) {
+    if (!v.isTerrain && v.y > peelBaseY && !isCutawayExteriorProp(v.name)) {
+      const key = `${v.x},${v.z}`;
+      let cur = colMap.get(key);
+      if (!cur) {
+        cur = {
+          x: v.x,
+          z: v.z,
+          belowCutCount: 0,
+          fullCount: 0,
+          hasBase1: false,
+          hasBase2: false,
+        };
+        colMap.set(key, cur);
+      }
+      cur.fullCount++;
+      if (v.y <= cutY) {
+        cur.belowCutCount++;
+      }
+      if (v.y === peelBaseY + 1) {
+        cur.hasBase1 = true;
+      } else if (v.y === peelBaseY + 2) {
+        cur.hasBase2 = true;
+      }
+    }
+  }
+
+  const allCols = Array.from(colMap.values()).filter((c) => c.belowCutCount > 0);
+  const baseTwoCols = allCols.filter((c) => c.hasBase1 && c.hasBase2);
+  const baseTallCols = allCols.filter((c) => c.hasBase1 && c.fullCount >= 2);
+  const fullTallCols = allCols.filter((c) => c.fullCount >= 2);
+  const baseOneCols = allCols.filter((c) => c.hasBase1);
+
+  const candidateCols =
+    baseTwoCols.length > 0
+      ? baseTwoCols
+      : baseTallCols.length > 0
+        ? baseTallCols
+        : fullTallCols.length > 0
+          ? fullTallCols
+          : baseOneCols.length > 0
+            ? baseOneCols
+            : allCols;
 
   let minBX = Infinity;
   let maxBX = -Infinity;
@@ -1314,11 +1395,25 @@ export function filterVoxelsForCutaway(
       zCounts.set(c.z, (zCounts.get(c.z) ?? 0) + 1);
     }
 
+    let maxXCount = 0;
+    for (const cnt of xCounts.values()) {
+      if (cnt > maxXCount) maxXCount = cnt;
+    }
+    let maxZCount = 0;
+    for (const cnt of zCounts.values()) {
+      if (cnt > maxZCount) maxZCount = cnt;
+    }
+
+    const xThreshold =
+      maxXCount >= 4 ? Math.floor(maxXCount * 0.5) + 1 : Math.min(2, maxXCount);
+    const zThreshold =
+      maxZCount >= 4 ? Math.floor(maxZCount * 0.5) + 1 : Math.min(2, maxZCount);
+
     const wallXs = candidateCols
-      .filter((c) => (xCounts.get(c.x) ?? 0) >= 2)
+      .filter((c) => (xCounts.get(c.x) ?? 0) >= xThreshold)
       .map((c) => c.x);
     const wallZs = candidateCols
-      .filter((c) => (zCounts.get(c.z) ?? 0) >= 2)
+      .filter((c) => (zCounts.get(c.z) ?? 0) >= zThreshold)
       .map((c) => c.z);
 
     const xs = wallXs.length > 0 ? wallXs : candidateCols.map((c) => c.x);
@@ -1334,7 +1429,7 @@ export function filterVoxelsForCutaway(
     }
   }
 
-  // Fallback if all non-terrain blocks at/below cutY are at minBY or props only
+  // Fallback if all non-terrain blocks at/below cutY are at peelBaseY or props only
   if (!Number.isFinite(minBX)) {
     for (const v of voxels) {
       if (!v.isTerrain && v.y <= cutY) {
@@ -1351,7 +1446,7 @@ export function filterVoxelsForCutaway(
       return false;
     }
 
-    if (!v.isTerrain && v.y > minBY && view && Number.isFinite(minBX)) {
+    if (!v.isTerrain && v.y > peelBaseY && view && Number.isFinite(minBX)) {
       switch (view) {
         case "NE":
           if (v.x === maxBX || v.z === minBZ) return false;

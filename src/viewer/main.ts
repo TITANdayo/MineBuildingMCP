@@ -42,6 +42,7 @@ class MineBuildingViewer {
   private currentTextures?: Record<string, string>;
   private currentBlockModels?: Record<string, CompiledBlockDefinition>;
   private syncGeneration = 0;
+  private cutawayGeneration = 0;
 
   private gridHelper: THREE.GridHelper | null = null;
   private debugMarkerGroup: THREE.Group;
@@ -242,6 +243,7 @@ class MineBuildingViewer {
   }
 
   private async refreshInteractiveCutaway(): Promise<void> {
+    const gen = ++this.cutawayGeneration;
     const toggleBtn = document.getElementById("cutaway-toggle-btn");
     const labelEl = document.getElementById("cutaway-y-label");
 
@@ -279,6 +281,12 @@ class MineBuildingViewer {
       this.currentBlockModels
     );
 
+    if (gen !== this.cutawayGeneration || !this.cutawayEnabled) {
+      this.disposeGroupGeometries(cutBuilt.visualGroup);
+      cutBuilt.pickerGeometry.dispose();
+      return;
+    }
+
     if (this.visualGroup) this.visualGroup.visible = false;
     this.interactiveCutawayGroup = cutBuilt.visualGroup;
     this.interactiveCutawayPickerGeometry = cutBuilt.pickerGeometry;
@@ -305,6 +313,7 @@ class MineBuildingViewer {
     blockModels?: Record<string, CompiledBlockDefinition>
   ): Promise<void> {
     const gen = ++this.syncGeneration;
+    this.cutawayGeneration++;
     const built = await buildWorldMeshes(voxels, size, textures, blockModels);
 
     if (gen !== this.syncGeneration) {

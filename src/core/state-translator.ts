@@ -230,7 +230,7 @@ export function javaToBedrockState(
         if (lower === "double") {
           bedrockName = bedrockName.replace(/_slab$/, "_double_slab");
           delete states["minecraft:vertical_half"];
-        } else {
+        } else if (!bedrockName.endsWith("_double_slab")) {
           const verticalHalf = lower === "top" ? "top" : "bottom";
           states["minecraft:vertical_half"] = {
             type: "string",

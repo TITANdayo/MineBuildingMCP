@@ -626,11 +626,14 @@ export class BuilderDSL {
       const iy = Math.floor(y);
       const iz = Math.floor(z);
 
-      const trimmedColor = color.trim().toLowerCase();
-      const bedBlock =
+      const trimmedColor = color.trim().toLowerCase() || "red";
+      let bedBlock =
         trimmedColor.endsWith("_bed") || trimmedColor.includes(":")
           ? normalizeBlockName(trimmedColor)
           : `minecraft:${trimmedColor}_bed`;
+      if (bedBlock === "minecraft:" || bedBlock === "minecraft:_bed") {
+        bedBlock = "minecraft:red_bed";
+      }
 
       let dx = 0;
       let dz = -1;
@@ -729,7 +732,7 @@ export class BuilderDSL {
    */
   public furnishRoom(
     roomId?: number,
-    style: "living" | "bedroom" | "study" | "workshop" = "living"
+    style: "living" | "bedroom" | "study" | "workshop" | "dining" = "living"
   ): void {
     this.beginOperation("furnishRoom", [roomId, style]);
     try {
@@ -946,6 +949,49 @@ export class BuilderDSL {
             occupiedFloor.add(`${spot.x},${spot.z}`);
           }
         }
+      } else if (style === "dining") {
+        // Dining style: spruce dining table + chair(s) + pantry barrel/smoker
+        let diningSetsPlaced = 0;
+        for (const spot of wallSpots) {
+          if (diningSetsPlaced >= 2) break;
+          const [ox, oz] = normalToOffset(spot.normal);
+          const chairX = spot.x + ox;
+          const chairZ = spot.z + oz;
+          if (
+            isCellFreeForFurniture(spot.x, spot.z) &&
+            isCellFreeForFurniture(chairX, chairZ)
+          ) {
+            this.placeTable(
+              spot.x,
+              floorY,
+              spot.z,
+              "minecraft:spruce_fence",
+              "minecraft:white_carpet"
+            );
+            this.placeChair(
+              chairX,
+              floorY,
+              chairZ,
+              "minecraft:spruce_stairs",
+              normalToFacing(spot.normal)
+            );
+            occupiedFloor.add(`${spot.x},${spot.z}`);
+            occupiedFloor.add(`${chairX},${chairZ}`);
+            diningSetsPlaced++;
+          }
+        }
+        for (const spot of wallSpots) {
+          if (isCellFreeForFurniture(spot.x, spot.z)) {
+            this.setBlockInternal(
+              spot.x,
+              floorY,
+              spot.z,
+              "minecraft:barrel"
+            );
+            occupiedFloor.add(`${spot.x},${spot.z}`);
+            break;
+          }
+        }
       } else {
         // Default "living" style: table + chair + bookshelf
         for (const spot of wallSpots) {
@@ -995,7 +1041,9 @@ export class BuilderDSL {
           ? "minecraft:green_carpet"
           : style === "workshop"
             ? "minecraft:gray_carpet"
-            : "minecraft:red_carpet";
+            : style === "dining"
+              ? "minecraft:yellow_carpet"
+              : "minecraft:red_carpet";
       if (
         !occupiedFloor.has(`${center.x},${center.z}`) &&
         !this.world.getVoxel(center.x, floorY, center.z) &&

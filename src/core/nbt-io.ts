@@ -1,6 +1,6 @@
 import * as fs from "node:fs/promises";
 import * as zlib from "node:zlib";
-import * as nbt from "prismarine-nbt";
+import * as nbtNamespace from "prismarine-nbt";
 import { BlockState } from "../types/shared.js";
 import {
   BedrockStateMap,
@@ -8,6 +8,10 @@ import {
   javaToBedrockState,
 } from "./state-translator.js";
 import { isAirBlock, normalizeBlockName, VoxelWorld } from "./voxel-world.js";
+
+const nbt =
+  (nbtNamespace as unknown as { default?: typeof nbtNamespace }).default ??
+  nbtNamespace;
 
 const DEFAULT_DATA_VERSION = 3953; // Minecraft 1.21 (Java)
 const DEFAULT_BEDROCK_BLOCK_VERSION = 18090528; // Minecraft 1.21 (Bedrock)
@@ -57,16 +61,34 @@ function isMcstructureRoot(rootValue: Record<string, unknown>): boolean {
   return false;
 }
 
-function parseMcstructureFromNbt(parsed: nbt.NBT): VoxelWorld {
+function parseMcstructureFromNbt(parsed: nbtNamespace.NBT): VoxelWorld {
   const simplified = nbt.simplify(parsed) as SimplifiedStructureNbt;
 
-  const rawSize = simplified.size ?? [32, 32, 32];
-  const sizeX = Math.max(1, Number(rawSize[0] ?? 32));
-  const sizeY = Math.max(1, Number(rawSize[1] ?? 32));
-  const sizeZ = Math.max(1, Number(rawSize[2] ?? 32));
-  const size: [number, number, number] = [sizeX, sizeY, sizeZ];
+  if (
+    !simplified ||
+    typeof simplified !== "object" ||
+    !Array.isArray(simplified.size) ||
+    simplified.size.length !== 3 ||
+    simplified.size.some(
+      (d) => typeof d !== "number" || !Number.isFinite(d) || d <= 0
+    ) ||
+    !simplified.structure ||
+    typeof simplified.structure !== "object" ||
+    !Array.isArray(simplified.structure.block_indices) ||
+    !simplified.structure.palette ||
+    typeof simplified.structure.palette !== "object"
+  ) {
+    throw new Error(
+      "Invalid .mcstructure data: missing valid size [x, y, z], structure.block_indices, or structure.palette."
+    );
+  }
 
-  const world = new VoxelWorld(size);
+  const origSizeX = Math.max(1, Math.floor(simplified.size[0]));
+  const origSizeY = Math.max(1, Math.floor(simplified.size[1]));
+  const origSizeZ = Math.max(1, Math.floor(simplified.size[2]));
+
+  const world = new VoxelWorld([origSizeX, origSizeY, origSizeZ]);
+  const [sizeX, sizeY, sizeZ] = world.size;
 
   // Extract raw block_palette from unsimplified NBT if available so state tag types (byte vs int vs string) are preserved
   const rawRoot = parsed.value as Record<string, any>;
@@ -115,7 +137,7 @@ function parseMcstructureFromNbt(parsed: nbt.NBT): VoxelWorld {
     for (let x = 0; x < sizeX; x++) {
       for (let y = 0; y < sizeY; y++) {
         for (let z = 0; z < sizeZ; z++) {
-          const index = x * (sizeY * sizeZ) + y * sizeZ + z;
+          const index = x * (origSizeY * origSizeZ) + y * origSizeZ + z;
           const paletteIdx = layer0[index];
           if (paletteIdx === undefined || paletteIdx < 0) continue;
           const paletteEntry = palette[paletteIdx];
@@ -143,7 +165,7 @@ function parseMcstructureFromNbt(parsed: nbt.NBT): VoxelWorld {
 export async function parseMcstructureBuffer(
   buffer: Buffer
 ): Promise<VoxelWorld> {
-  let parsed: nbt.NBT;
+  let parsed: nbtNamespace.NBT;
   try {
     const res = await nbt.parse(buffer, "little");
     parsed = res.parsed;
@@ -204,7 +226,7 @@ export async function serializeMcstructureBuffer(
   }
 
   const blockPaletteEntries = Array.from(paletteMap.values()).map((entry) => {
-    const statesCompound: Record<string, nbt.Tags[nbt.TagType]> = {};
+    const statesCompound: Record<string, nbtNamespace.Tags[nbtNamespace.TagType]> = {};
     for (const [k, v] of Object.entries(entry.bedrockStates)) {
       if (v.type === "byte") {
         statesCompound[k] = nbt.byte(Number(v.value));
@@ -237,14 +259,14 @@ export async function serializeMcstructureBuffer(
               { type: nbt.TagType.Int, value: layer1 },
             ],
           },
-        } as unknown as nbt.Tags[nbt.TagType],
+        } as unknown as nbtNamespace.Tags[nbtNamespace.TagType],
         entities: {
           type: nbt.TagType.List,
           value: {
             type: "end",
             value: [],
           },
-        } as unknown as nbt.Tags[nbt.TagType],
+        } as unknown as nbtNamespace.Tags[nbtNamespace.TagType],
         palette: nbt.comp({
           default: nbt.comp({
             block_palette: {
@@ -253,14 +275,14 @@ export async function serializeMcstructureBuffer(
                 type: nbt.TagType.Compound,
                 value: blockPaletteEntries,
               },
-            } as unknown as nbt.Tags[nbt.TagType],
+            } as unknown as nbtNamespace.Tags[nbtNamespace.TagType],
             block_position_data: nbt.comp({}),
           }),
         }),
       }),
     },
     ""
-  ) as unknown as nbt.NBT;
+  ) as unknown as nbtNamespace.NBT;
 
   return nbt.writeUncompressed(rootTag, "little");
 }
@@ -281,7 +303,7 @@ export async function saveMcstructure(
 export async function parseStructureNbtBuffer(
   buffer: Buffer
 ): Promise<VoxelWorld> {
-  let parsed: nbt.NBT;
+  let parsed: nbtNamespace.NBT;
   try {
     const res = await nbt.parse(buffer);
     parsed = res.parsed;
@@ -412,11 +434,11 @@ export async function serializeStructureNbtBuffer(
   }
 
   const paletteNbtValue = Array.from(paletteMap.values()).map((entry) => {
-    const compound: Record<string, nbt.Tags[nbt.TagType]> = {
+    const compound: Record<string, nbtNamespace.Tags[nbtNamespace.TagType]> = {
       Name: { type: nbt.TagType.String, value: entry.name },
     };
     if (entry.state && Object.keys(entry.state).length > 0) {
-      const propsCompound: Record<string, nbt.Tags[nbt.TagType]> = {};
+      const propsCompound: Record<string, nbtNamespace.Tags[nbtNamespace.TagType]> = {};
       for (const [k, v] of Object.entries(entry.state)) {
         propsCompound[k] = { type: nbt.TagType.String, value: String(v) };
       }
@@ -435,14 +457,14 @@ export async function serializeStructureNbtBuffer(
         type: nbt.TagType.Int,
         value: blk.pos,
       },
-    } as nbt.Tags[nbt.TagType],
+    } as nbtNamespace.Tags[nbtNamespace.TagType],
     state: {
       type: nbt.TagType.Int,
       value: blk.state,
-    } as nbt.Tags[nbt.TagType],
+    } as nbtNamespace.Tags[nbtNamespace.TagType],
   }));
 
-  const rootNbt: nbt.NBT = {
+  const rootNbt: nbtNamespace.NBT = {
     name: "",
     type: nbt.TagType.Compound,
     value: {
