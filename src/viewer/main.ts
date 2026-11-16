@@ -2,6 +2,7 @@ import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import type {
   CardinalDirection,
+  CompiledBlockDefinition,
   InspectResult,
   RenderInteriorRoomCamera,
   TraceRecord,
@@ -39,6 +40,8 @@ class MineBuildingViewer {
 
   private currentVoxels: VoxelData[] = [];
   private currentTextures?: Record<string, string>;
+  private currentBlockModels?: Record<string, CompiledBlockDefinition>;
+  private syncGeneration = 0;
 
   private gridHelper: THREE.GridHelper | null = null;
   private debugMarkerGroup: THREE.Group;
@@ -117,6 +120,13 @@ class MineBuildingViewer {
     group.traverse((obj) => {
       if (obj instanceof THREE.Mesh || obj instanceof THREE.LineSegments) {
         obj.geometry.dispose();
+        if (Array.isArray(obj.material)) {
+          for (const mat of obj.material) {
+            mat.dispose();
+          }
+        } else if (obj.material) {
+          obj.material.dispose();
+        }
       }
     });
   }
@@ -262,7 +272,12 @@ class MineBuildingViewer {
 
     const view = this.getEffectiveCutawayView();
     const filtered = filterVoxelsForCutaway(this.currentVoxels, this.cutawayY, view);
-    const cutBuilt = await buildWorldMeshes(filtered, this.worldSize, this.currentTextures);
+    const cutBuilt = await buildWorldMeshes(
+      filtered,
+      this.worldSize,
+      this.currentTextures,
+      this.currentBlockModels
+    );
 
     if (this.visualGroup) this.visualGroup.visible = false;
     this.interactiveCutawayGroup = cutBuilt.visualGroup;
@@ -286,11 +301,22 @@ class MineBuildingViewer {
     voxels: VoxelData[],
     size: [number, number, number],
     traces?: Record<number, TraceRecord>,
-    textures?: Record<string, string>
+    textures?: Record<string, string>,
+    blockModels?: Record<string, CompiledBlockDefinition>
   ): Promise<void> {
+    const gen = ++this.syncGeneration;
+    const built = await buildWorldMeshes(voxels, size, textures, blockModels);
+
+    if (gen !== this.syncGeneration) {
+      this.disposeGroupGeometries(built.visualGroup);
+      built.pickerGeometry.dispose();
+      return;
+    }
+
     this.worldSize = size;
     this.currentVoxels = voxels;
     this.currentTextures = textures;
+    this.currentBlockModels = blockModels;
     this.updateGridHelper(size);
 
     if (this.visualGroup) {
@@ -308,7 +334,6 @@ class MineBuildingViewer {
       this.interactiveCutawayPickerGeometry = null;
     }
 
-    const built = await buildWorldMeshes(voxels, size, textures);
     this.visualGroup = built.visualGroup;
     this.fullPickerGeometry = built.pickerGeometry;
     this.worldBounds = built.bounds;
@@ -529,7 +554,8 @@ class MineBuildingViewer {
       const cutBuilt = await buildWorldMeshes(
         filteredVoxels,
         this.worldSize,
-        this.currentTextures
+        this.currentTextures,
+        this.currentBlockModels
       );
 
       this.scene.add(cutBuilt.visualGroup);
@@ -935,7 +961,7 @@ class MineBuildingViewer {
   private async handleWsRequest(req: WsRequest): Promise<void> {
     switch (req.type) {
       case "SYNC_WORLD": {
-        await this.syncWorld(req.voxels, req.size, req.traces, req.textures);
+        await this.syncWorld(req.voxels, req.size, req.traces, req.textures, req.blockModels);
         this.sendWsResponse({
           type: "SYNC_ACK",
           id: req.id

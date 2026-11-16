@@ -380,4 +380,289 @@ describe("MineBuildingMCP End-to-End Verification", () => {
       state: { hanging: "true" }
     });
   });
+
+  it("7. Detects light_gray_concrete / light_blue_stained_glass rooms accurately and preserves 2-wide headroom=2 corridors", async () => {
+    const { VoxelWorld, isLightBlockName } = await import("../src/core/voxel-world.js");
+
+    expect(isLightBlockName("minecraft:light_gray_concrete")).toBe(false);
+    expect(isLightBlockName("minecraft:light_blue_stained_glass")).toBe(false);
+    expect(isLightBlockName("minecraft:light_weighted_pressure_plate")).toBe(false);
+    expect(isLightBlockName("minecraft:daylight_detector")).toBe(false);
+    expect(isLightBlockName("minecraft:light")).toBe(true);
+    expect(isLightBlockName("minecraft:lantern")).toBe(true);
+
+    // Enclosed room built from light_gray_concrete + light_blue_stained_glass (no door, no light)
+    const concreteWorld = new VoxelWorld([20, 16, 20]);
+    for (let x = 4; x <= 10; x++) {
+      for (let z = 4; z <= 10; z++) {
+        concreteWorld.setVoxel(x, 4, z, "minecraft:light_gray_concrete", undefined, false, 1);
+        concreteWorld.setVoxel(x, 8, z, "minecraft:light_gray_concrete", undefined, false, 1);
+        if (x === 4 || x === 10 || z === 4 || z === 10) {
+          for (let y = 5; y <= 7; y++) {
+            const isWindow = y === 6 && (x === 7 || z === 7);
+            concreteWorld.setVoxel(
+              x,
+              y,
+              z,
+              isWindow ? "minecraft:light_blue_stained_glass" : "minecraft:light_gray_concrete",
+              undefined,
+              false,
+              2
+            );
+          }
+        }
+      }
+    }
+
+    const concreteReport = concreteWorld.detectInteriorRooms();
+    expect(concreteReport.rooms.length).toBe(1);
+    expect(concreteReport.rooms[0].lightingCount).toBe(0);
+    expect(concreteReport.flowIssues.some((i) => i.type === "unlit_room")).toBe(true);
+    expect(concreteReport.flowIssues.some((i) => i.type === "isolated_room")).toBe(true);
+    expect(concreteReport.validFlow).toBe(false);
+
+    // 2-wide corridor with headroom === 2 (air y=5..6, ceiling y=7)
+    const corridorWorld = new VoxelWorld([24, 16, 24]);
+    for (let x = 10; x <= 13; x++) {
+      for (let z = 10; z <= 17; z++) {
+        corridorWorld.setVoxel(x, 4, z, "minecraft:stone_bricks", undefined, false, 1);
+        corridorWorld.setVoxel(x, 7, z, "minecraft:stone_bricks", undefined, false, 1);
+        if (x === 10 || x === 13 || z === 10 || z === 17) {
+          for (let y = 5; y <= 6; y++) {
+            if (x === 11 && z === 10) {
+              corridorWorld.setVoxel(
+                x,
+                y,
+                z,
+                "minecraft:oak_door",
+                { facing: "south", half: y === 5 ? "lower" : "upper" },
+                false,
+                2
+              );
+            } else {
+              corridorWorld.setVoxel(x, y, z, "minecraft:stone_bricks", undefined, false, 1);
+            }
+          }
+        }
+      }
+    }
+
+    const corridorReport = corridorWorld.detectInteriorRooms();
+    expect(corridorReport.rooms.length).toBe(1);
+    expect(corridorReport.rooms[0].volume).toBe(24);
+    expect(corridorReport.rooms[0].floorY).toBe(5);
+    expect(corridorReport.rooms[0].ceilingY).toBe(6);
+    expect(corridorReport.rooms[0].doors.some((d) => d.block.includes("oak_door"))).toBe(true);
+    expect(corridorReport.rooms[0].doors.some((d) => d.block.includes("doorway_opening"))).toBe(false);
+  });
+
+  it("8. Translates double slabs, beds, and trapdoors accurately in state-translator & .mcstructure roundtrip", async () => {
+    const { javaToBedrockState, bedrockToJavaState } = await import("../src/core/state-translator.js");
+    const { serializeMcstructureBuffer, parseMcstructureBuffer } = await import("../src/core/nbt-io.js");
+    const { VoxelWorld } = await import("../src/core/voxel-world.js");
+
+    // Double slabs must emit *_double_slab without invalid vertical_half="double"
+    const doubleSlabBedrock = javaToBedrockState("minecraft:stone_brick_slab", { type: "double" });
+    expect(doubleSlabBedrock.name).toBe("minecraft:stone_brick_double_slab");
+    expect(doubleSlabBedrock.states["minecraft:vertical_half"]).toBeUndefined();
+
+    const doubleSlabFromHalf = javaToBedrockState("minecraft:oak_slab", { half: "double" });
+    expect(doubleSlabFromHalf.name).toBe("minecraft:oak_double_slab");
+    expect(doubleSlabFromHalf.states["minecraft:vertical_half"]).toBeUndefined();
+
+    expect(bedrockToJavaState(doubleSlabBedrock.name, doubleSlabBedrock.states)).toEqual({
+      name: "minecraft:stone_brick_slab",
+      state: { type: "double" }
+    });
+
+    // Beds (facing + part <-> direction + head_piece_bit)
+    const bedBedrock = javaToBedrockState("minecraft:red_bed", {
+      facing: "north",
+      part: "head"
+    });
+    expect(bedBedrock.name).toBe("minecraft:red_bed");
+    expect(bedBedrock.states.direction).toEqual({ type: "int", value: 2 });
+    expect(bedBedrock.states.head_piece_bit).toEqual({ type: "byte", value: 1 });
+    expect(bedrockToJavaState(bedBedrock.name, bedBedrock.states)).toEqual({
+      name: "minecraft:red_bed",
+      state: { facing: "north", part: "head" }
+    });
+    expect(javaToBedrockState("minecraft:bedrock", { infiniburn_bit: "false" }).name).toBe("minecraft:bedrock");
+
+    // Trapdoors (facing + half + open <-> direction + upside_down_bit + open_bit)
+    const trapdoorBedrock = javaToBedrockState("minecraft:oak_trapdoor", {
+      facing: "east",
+      half: "top",
+      open: "true"
+    });
+    expect(trapdoorBedrock.states.direction).toEqual({ type: "int", value: 0 });
+    expect(trapdoorBedrock.states.upside_down_bit).toEqual({ type: "byte", value: 1 });
+    expect(trapdoorBedrock.states.open_bit).toEqual({ type: "byte", value: 1 });
+    expect(bedrockToJavaState(trapdoorBedrock.name, trapdoorBedrock.states)).toEqual({
+      name: "minecraft:oak_trapdoor",
+      state: { facing: "east", half: "top", open: "true" }
+    });
+
+    // Full .mcstructure binary roundtrip
+    const world = new VoxelWorld([8, 8, 8]);
+    world.setVoxel(1, 1, 1, "minecraft:stone_brick_slab", { type: "double" }, false, 1);
+    world.setVoxel(2, 1, 2, "minecraft:red_bed", { facing: "east", part: "foot" }, false, 2);
+    world.setVoxel(3, 2, 3, "minecraft:oak_trapdoor", { facing: "south", half: "top", open: "true" }, false, 3);
+
+    const buf = await serializeMcstructureBuffer(world);
+    const parsed = await parseMcstructureBuffer(buf);
+    expect(parsed.getVoxel(1, 1, 1)).toMatchObject({
+      name: "minecraft:stone_brick_slab",
+      state: { type: "double" }
+    });
+    expect(parsed.getVoxel(2, 1, 2)).toMatchObject({
+      name: "minecraft:red_bed",
+      state: { facing: "east", part: "foot" }
+    });
+    expect(parsed.getVoxel(3, 2, 3)).toMatchObject({
+      name: "minecraft:oak_trapdoor",
+      state: { facing: "south", half: "top", open: "true" }
+    });
+  });
+
+  it("9. Clears JarAssetLoader texture cache on init(), filters cutaway props cleanly, and renders cutaway with blockModels", async () => {
+    const AdmZip = (await import("adm-zip")).default;
+    const { filterVoxelsForCutaway } = await import("../src/viewer/voxel-mesh.js");
+    const { VoxelWorld } = await import("../src/core/voxel-world.js");
+
+    // 1. Verify JarAssetLoader.init() clears textureAssetCache
+    const tmpDir = path.resolve(process.cwd(), `samples/.tmp_jar_test_${process.pid}`);
+    fs.mkdirSync(tmpDir, { recursive: true });
+
+    const makeMinimalJar = (jarFile: string, rgb: [number, number, number]) => {
+      const png = new PNG({ width: 16, height: 16 });
+      for (let i = 0; i < png.data.length; i += 4) {
+        png.data[i] = rgb[0];
+        png.data[i + 1] = rgb[1];
+        png.data[i + 2] = rgb[2];
+        png.data[i + 3] = 255;
+      }
+      const zip = new AdmZip();
+      zip.addFile("assets/minecraft/textures/block/stone.png", PNG.sync.write(png));
+      zip.addFile(
+        "assets/minecraft/blockstates/stone.json",
+        Buffer.from(JSON.stringify({ variants: { "": { model: "minecraft:block/stone" } } }))
+      );
+      zip.addFile(
+        "assets/minecraft/models/block/stone.json",
+        Buffer.from(
+          JSON.stringify({
+            parent: "minecraft:block/cube_all",
+            textures: { all: "minecraft:block/stone" }
+          })
+        )
+      );
+      zip.writeZip(jarFile);
+    };
+
+    try {
+      const jar1 = path.join(tmpDir, "pack1.jar");
+      const jar2 = path.join(tmpDir, "pack2.jar");
+      makeMinimalJar(jar1, [220, 30, 30]);
+      makeMinimalJar(jar2, [30, 60, 230]);
+
+      const loader = new JarAssetLoader(jar1);
+      const tex1 = loader.getTexturesForBlocks(["minecraft:stone"]);
+      const png1 = PNG.sync.read(
+        Buffer.from(tex1["stone"].replace(/^data:image\/png;base64,/, ""), "base64")
+      );
+      expect([png1.data[0], png1.data[1], png1.data[2]]).toEqual([220, 30, 30]);
+
+      loader.init(jar2);
+      const tex2 = loader.getTexturesForBlocks(["minecraft:stone"]);
+      const png2 = PNG.sync.read(
+        Buffer.from(tex2["stone"].replace(/^data:image\/png;base64,/, ""), "base64")
+      );
+      expect([png2.data[0], png2.data[1], png2.data[2]]).toEqual([30, 60, 230]);
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+
+    // 2. Verify filterVoxelsForCutaway ignores exterior fence/lantern props when peeling outer walls
+    const world = new VoxelWorld([24, 16, 24]);
+    for (let x = 10; x <= 16; x++) {
+      for (let z = 10; z <= 16; z++) {
+        world.setVoxel(x, 4, z, "minecraft:stone_bricks", undefined, false, 1);
+        world.setVoxel(x, 8, z, "minecraft:stone_bricks", undefined, false, 1);
+        if (x === 10 || x === 16 || z === 10 || z === 16) {
+          for (let y = 5; y <= 7; y++) {
+            world.setVoxel(x, y, z, "minecraft:oak_planks", undefined, false, 2);
+          }
+        }
+      }
+    }
+    world.setVoxel(13, 5, 13, "minecraft:custom_half_bench", undefined, false, 3);
+    world.setVoxel(20, 5, 13, "minecraft:oak_fence", undefined, false, 4);
+    world.setVoxel(20, 6, 13, "minecraft:lantern", undefined, false, 4);
+
+    const cutNE = filterVoxelsForCutaway(world.getAllVoxels(), 6, "NE");
+    expect(cutNE.some((v) => v.y > 6)).toBe(false);
+    expect(cutNE.some((v) => !v.isTerrain && v.y > 4 && (v.x === 16 || v.z === 10))).toBe(false);
+    expect(cutNE.some((v) => v.x === 10 && v.y === 5 && v.z === 13)).toBe(true);
+    expect(cutNE.some((v) => v.x === 13 && v.y === 5 && v.z === 13)).toBe(true);
+
+    // 3. Verify buildWorldMeshes with explicit blockModels during syncWorld + renderInterior cutaway
+    const customBenchDef = {
+      blockName: "custom_half_bench",
+      variants: { "": [{ model: "custom_half_bench" }] },
+      models: {
+        custom_half_bench: [
+          {
+            from: [0, 0, 0] as [number, number, number],
+            to: [16, 8, 16] as [number, number, number],
+            faces: {
+              down: { textureKey: "oak_planks", cullface: "down" as const },
+              up: { textureKey: "oak_planks" },
+              north: { textureKey: "oak_planks", cullface: "north" as const },
+              south: { textureKey: "oak_planks", cullface: "south" as const },
+              west: { textureKey: "oak_planks", cullface: "west" as const },
+              east: { textureKey: "oak_planks", cullface: "east" as const }
+            }
+          }
+        ]
+      },
+      isFullOpaqueCube: false,
+      isFluid: false,
+      isTranslucent: false
+    };
+
+    const loader = new JarAssetLoader();
+    const voxels = world.getAllVoxels();
+    const uniqueNames = Array.from(new Set(voxels.map((v) => v.name)));
+    const blockModels = {
+      ...loader.getBlockModelsForBlocks(uniqueNames),
+      custom_half_bench: customBenchDef
+    };
+    const textures = loader.getTexturesForBlocks([...uniqueNames, "minecraft:oak_planks"]);
+
+    await wsBridge.syncWorld({
+      voxels,
+      size: world.size,
+      traces: {
+        1: { opId: 1, line: 1, codeSnippet: "floor()" },
+        2: { opId: 2, line: 2, codeSnippet: "walls()" },
+        3: { opId: 3, line: 3, codeSnippet: "bench()" },
+        4: { opId: 4, line: 4, codeSnippet: "fence()" }
+      },
+      textures,
+      blockModels
+    });
+
+    const interiorRender = await wsBridge.renderInterior(
+      6,
+      [{ roomId: 1, eyePosition: { x: 13.5, y: 6.6, z: 13.5 } }],
+      128
+    );
+    expect(interiorRender.cutY).toBe(6);
+    const pngCut = PNG.sync.read(
+      Buffer.from(interiorRender.cutawayImages.NE.replace(/^data:image\/png;base64,/, ""), "base64")
+    );
+    expect(pngCut.width).toBe(128);
+    expect(pngCut.height).toBe(128);
+  }, 45000);
 });

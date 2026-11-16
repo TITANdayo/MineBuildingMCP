@@ -33,7 +33,6 @@ const LIGHT_BLOCK_KEYWORDS = [
   "campfire",
   "jack_o_lantern",
   "beacon",
-  "light",
 ];
 
 export function isDoorBlockName(name: string): boolean {
@@ -44,6 +43,7 @@ export function isDoorBlockName(name: string): boolean {
 
 export function isLightBlockName(name: string): boolean {
   const norm = normalizeBlockName(name);
+  if (norm === "minecraft:light") return true;
   return LIGHT_BLOCK_KEYWORDS.some((kw) => norm.includes(kw));
 }
 
@@ -71,7 +71,9 @@ export function isInteriorFixtureBlock(name: string): boolean {
       !norm.includes("sea_lantern") &&
       !norm.includes("froglight") &&
       !norm.includes("shroomlight") &&
-      !norm.includes("lamp")
+      !norm.includes("lamp") &&
+      !norm.includes("jack_o_lantern") &&
+      !norm.includes("beacon")
     );
   }
   return (
@@ -622,15 +624,17 @@ export class VoxelWorld {
     if (this.voxels.has(VoxelWorld.coordKey(x, y, z))) return false;
 
     // Must have a non-terrain lintel/header block directly above within 1..2 blocks
-    let hasLintel = false;
-    for (let dy = 1; dy <= 2 && y + dy < this.size[1]; dy++) {
-      const above = this.voxels.get(VoxelWorld.coordKey(x, y + dy, z));
-      if (above && !above.isTerrain && !isInteriorFixtureBlock(above.name)) {
-        hasLintel = true;
-        break;
+    const hasLintelAt = (lx: number, ly: number, lz: number): boolean => {
+      for (let dy = 1; dy <= 2 && ly + dy < this.size[1]; dy++) {
+        const above = this.voxels.get(VoxelWorld.coordKey(lx, ly + dy, lz));
+        if (above && !above.isTerrain && !isInteriorFixtureBlock(above.name)) {
+          return true;
+        }
       }
-    }
-    if (!hasLintel) return false;
+      return false;
+    };
+
+    if (!hasLintelAt(x, y, z)) return false;
 
     // A true wall pillar at (wx, y, wz) must be solid at y AND solid at y+1 (or y-1 if y is top of doorway)
     const isWallPillarAt = (wx: number, wy: number, wz: number): boolean => {
@@ -647,33 +651,107 @@ export class VoxelWorld {
       return !v || isInteriorFixtureBlock(v.name);
     };
 
+    // Checks if adjacent slice along Z has a lintel and flanking wall pillars on both sides of [lx..x-1] and [x+1..rx]
+    const isNarrowlyEnclosedSliceZ = (
+      nz: number,
+      lx: number,
+      rx: number
+    ): boolean => {
+      if (!hasLintelAt(x, y, nz)) return false;
+      let hasLeft = false;
+      for (let wx = lx; wx < x; wx++) {
+        if (isWallPillarAt(wx, y, nz)) {
+          hasLeft = true;
+          break;
+        }
+      }
+      if (!hasLeft) return false;
+      for (let wx = x + 1; wx <= rx; wx++) {
+        if (isWallPillarAt(wx, y, nz)) {
+          return true;
+        }
+      }
+      return false;
+    };
+
+    // Checks if adjacent slice along X has a lintel and flanking wall pillars on both sides of [lz..z-1] and [z+1..rz]
+    const isNarrowlyEnclosedSliceX = (
+      nx: number,
+      lz: number,
+      rz: number
+    ): boolean => {
+      if (!hasLintelAt(nx, y, z)) return false;
+      let hasNorth = false;
+      for (let wz = lz; wz < z; wz++) {
+        if (isWallPillarAt(nx, y, wz)) {
+          hasNorth = true;
+          break;
+        }
+      }
+      if (!hasNorth) return false;
+      for (let wz = z + 1; wz <= rz; wz++) {
+        if (isWallPillarAt(nx, y, wz)) {
+          return true;
+        }
+      }
+      return false;
+    };
+
     // Check 1-wide or 2-wide opening in an X-aligned wall (wall along X, passage along Z)
     const openZ = isOpenAt(x, y, z - 1) && isOpenAt(x, y, z + 1);
     if (openZ) {
-      const wall1X = isWallPillarAt(x - 1, y, z) && isWallPillarAt(x + 1, y, z);
+      const wall1X =
+        isWallPillarAt(x - 1, y, z) &&
+        isWallPillarAt(x + 1, y, z) &&
+        !(
+          isNarrowlyEnclosedSliceZ(z - 1, x - 1, x + 1) &&
+          isNarrowlyEnclosedSliceZ(z + 1, x - 1, x + 1)
+        );
       const wall2XLeft =
         isWallPillarAt(x - 1, y, z) &&
         isOpenAt(x + 1, y, z) &&
-        isWallPillarAt(x + 2, y, z);
+        isWallPillarAt(x + 2, y, z) &&
+        !(
+          isNarrowlyEnclosedSliceZ(z - 1, x - 1, x + 2) &&
+          isNarrowlyEnclosedSliceZ(z + 1, x - 1, x + 2)
+        );
       const wall2XRight =
         isWallPillarAt(x - 2, y, z) &&
         isOpenAt(x - 1, y, z) &&
-        isWallPillarAt(x + 1, y, z);
+        isWallPillarAt(x + 1, y, z) &&
+        !(
+          isNarrowlyEnclosedSliceZ(z - 1, x - 2, x + 1) &&
+          isNarrowlyEnclosedSliceZ(z + 1, x - 2, x + 1)
+        );
       if (wall1X || wall2XLeft || wall2XRight) return true;
     }
 
     // Check 1-wide or 2-wide opening in a Z-aligned wall (wall along Z, passage along X)
     const openX = isOpenAt(x - 1, y, z) && isOpenAt(x + 1, y, z);
     if (openX) {
-      const wall1Z = isWallPillarAt(x, y, z - 1) && isWallPillarAt(x, y, z + 1);
+      const wall1Z =
+        isWallPillarAt(x, y, z - 1) &&
+        isWallPillarAt(x, y, z + 1) &&
+        !(
+          isNarrowlyEnclosedSliceX(x - 1, z - 1, z + 1) &&
+          isNarrowlyEnclosedSliceX(x + 1, z - 1, z + 1)
+        );
       const wall2ZNorth =
         isWallPillarAt(x, y, z - 1) &&
         isOpenAt(x, y, z + 1) &&
-        isWallPillarAt(x, y, z + 2);
+        isWallPillarAt(x, y, z + 2) &&
+        !(
+          isNarrowlyEnclosedSliceX(x - 1, z - 1, z + 2) &&
+          isNarrowlyEnclosedSliceX(x + 1, z - 1, z + 2)
+        );
       const wall2ZSouth =
         isWallPillarAt(x, y, z - 2) &&
         isOpenAt(x, y, z - 1) &&
-        isWallPillarAt(x, y, z + 1);
+        isWallPillarAt(x, y, z + 1) &&
+        !(
+          isNarrowlyEnclosedSliceX(x - 1, z - 2, z + 1) &&
+          isNarrowlyEnclosedSliceX(x + 1, z - 2, z + 1)
+        );
       if (wall1Z || wall2ZNorth || wall2ZSouth) return true;
     }
 
@@ -907,14 +985,19 @@ export class VoxelWorld {
       [0, -1],
     ];
 
+    const scanMinX = Math.max(0, minBuildX - 1);
+    const scanMaxX = Math.min(sizeX - 1, maxBuildX + 1);
+    const scanMinZ = Math.max(0, minBuildZ - 1);
+    const scanMaxZ = Math.min(sizeZ - 1, maxBuildZ + 1);
+
     for (let y = Math.max(0, minBuildY); y <= Math.min(sizeY - 1, maxBuildY); y++) {
       const queue: Array<[number, number]> = [];
-      for (let x = 0; x < sizeX; x++) {
-        for (let z = 0; z < sizeZ; z++) {
+      for (let x = scanMinX; x <= scanMaxX; x++) {
+        for (let z = scanMinZ; z <= scanMaxZ; z++) {
           const key = VoxelWorld.coordKey(x, y, z);
           if (isStructuralSolid(x, y, z) || apertureKeys.has(key)) continue;
           const onEdge =
-            x === 0 || x === sizeX - 1 || z === 0 || z === sizeZ - 1;
+            x === scanMinX || x === scanMaxX || z === scanMinZ || z === scanMaxZ;
           const hasRoof = findCeilingBlockY(x, y, z) >= 0;
           if (onEdge || !hasRoof) {
             outsideAirKeys.add(key);
@@ -929,7 +1012,7 @@ export class VoxelWorld {
         for (const [dx, dz] of cardinals2D) {
           const nx = cx + dx;
           const nz = cz + dz;
-          if (nx < 0 || nx >= sizeX || nz < 0 || nz >= sizeZ) continue;
+          if (nx < scanMinX || nx > scanMaxX || nz < scanMinZ || nz > scanMaxZ) continue;
           const nKey = VoxelWorld.coordKey(nx, y, nz);
           if (
             outsideAirKeys.has(nKey) ||
@@ -1365,6 +1448,15 @@ export class VoxelWorld {
         });
       }
 
+      if (roomDoors.length === 0) {
+        flowIssues.push({
+          type: "isolated_room",
+          roomId,
+          coord: center,
+          message: `Room #${roomId} at floorY=${floorY} has no doorway or entrance (doors=0). Add a door using placeDoor().`,
+        });
+      }
+
       // Unused variable suppression check: floorColSet is available if needed
       void floorColSet;
 
@@ -1427,7 +1519,10 @@ export class VoxelWorld {
 
     const validFlow =
       flowIssues.filter(
-        (i) => i.type === "door_blocked" || i.type === "low_headroom"
+        (i) =>
+          i.type === "door_blocked" ||
+          i.type === "low_headroom" ||
+          i.type === "isolated_room"
       ).length === 0;
 
     const summaryLines: string[] = [];

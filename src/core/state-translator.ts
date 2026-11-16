@@ -61,6 +61,34 @@ const DIRECTION_TO_DOOR_FACING: Record<number, string> = {
   3: "north",
 };
 
+const BED_FACING_TO_DIRECTION: Record<string, number> = {
+  south: 0,
+  west: 1,
+  north: 2,
+  east: 3,
+};
+
+const DIRECTION_TO_BED_FACING: Record<number, string> = {
+  0: "south",
+  1: "west",
+  2: "north",
+  3: "east",
+};
+
+const TRAPDOOR_FACING_TO_DIRECTION: Record<string, number> = {
+  east: 0,
+  west: 1,
+  south: 2,
+  north: 3,
+};
+
+const DIRECTION_TO_TRAPDOOR_FACING: Record<number, string> = {
+  0: "east",
+  1: "west",
+  2: "south",
+  3: "north",
+};
+
 const KNOWN_BOOLEAN_STATE_KEYS = new Set([
   "hanging",
   "open",
@@ -69,6 +97,8 @@ const KNOWN_BOOLEAN_STATE_KEYS = new Set([
   "upper_block_bit",
   "top_slot_bit",
   "door_hinge_bit",
+  "head_piece_bit",
+  "occupied_bit",
   "powered",
   "powered_bit",
   "lit",
@@ -93,8 +123,20 @@ function isSlabBlock(shortName: string): boolean {
   return shortName.endsWith("_slab");
 }
 
+function isDoubleSlabBlock(shortName: string): boolean {
+  return shortName.endsWith("_double_slab");
+}
+
 function isDoorBlock(shortName: string): boolean {
   return shortName.endsWith("_door") && !shortName.endsWith("trapdoor");
+}
+
+function isTrapdoorBlock(shortName: string): boolean {
+  return shortName === "trapdoor" || shortName.endsWith("_trapdoor");
+}
+
+function isBedBlock(shortName: string): boolean {
+  return shortName === "bed" || shortName.endsWith("_bed");
 }
 
 function isLanternBlock(shortName: string): boolean {
@@ -151,7 +193,7 @@ export function javaToBedrockState(
 } {
   const normalizedName = normalizeBlockName(blockName);
   // Keep modern Bedrock canonical names (and map legacy Bedrock "minecraft:grass" to "minecraft:grass_block")
-  const bedrockName =
+  let bedrockName =
     normalizedName === "minecraft:grass"
       ? "minecraft:grass_block"
       : normalizedName;
@@ -185,12 +227,16 @@ export function javaToBedrockState(
     if (isSlabBlock(shortName)) {
       if (key === "half" || key === "type") {
         const lower = val.toLowerCase();
-        const verticalHalf =
-          lower === "top" ? "top" : lower === "double" ? "double" : "bottom";
-        states["minecraft:vertical_half"] = {
-          type: "string",
-          value: verticalHalf,
-        };
+        if (lower === "double") {
+          bedrockName = bedrockName.replace(/_slab$/, "_double_slab");
+          delete states["minecraft:vertical_half"];
+        } else {
+          const verticalHalf = lower === "top" ? "top" : "bottom";
+          states["minecraft:vertical_half"] = {
+            type: "string",
+            value: verticalHalf,
+          };
+        }
         continue;
       }
     }
@@ -221,7 +267,43 @@ export function javaToBedrockState(
       }
     }
 
-    // 4. Lanterns (lantern, soul_lantern)
+    // 4. Trapdoors (_trapdoor)
+    if (isTrapdoorBlock(shortName)) {
+      if (key === "facing") {
+        const dir = TRAPDOOR_FACING_TO_DIRECTION[val.toLowerCase()] ?? 3;
+        states["direction"] = { type: "int", value: dir };
+        continue;
+      }
+      if (key === "half") {
+        const bit = val.toLowerCase() === "top" ? 1 : 0;
+        states["upside_down_bit"] = { type: "byte", value: bit };
+        continue;
+      }
+      if (key === "open") {
+        states["open_bit"] = { type: "byte", value: toBooleanByte(val) };
+        continue;
+      }
+    }
+
+    // 5. Beds (_bed)
+    if (isBedBlock(shortName)) {
+      if (key === "facing") {
+        const dir = BED_FACING_TO_DIRECTION[val.toLowerCase()] ?? 2;
+        states["direction"] = { type: "int", value: dir };
+        continue;
+      }
+      if (key === "part") {
+        const isHead = val.toLowerCase() === "head";
+        states["head_piece_bit"] = { type: "byte", value: isHead ? 1 : 0 };
+        continue;
+      }
+      if (key === "occupied") {
+        states["occupied_bit"] = { type: "byte", value: toBooleanByte(val) };
+        continue;
+      }
+    }
+
+    // 6. Lanterns (lantern, soul_lantern)
     if (isLanternBlock(shortName)) {
       if (key === "hanging") {
         states["hanging"] = { type: "byte", value: toBooleanByte(val) };
@@ -229,7 +311,7 @@ export function javaToBedrockState(
       }
     }
 
-    // 5. Logs / Pillars (_log, _stem, _wood, pillar, basalt, deepslate)
+    // 7. Logs / Pillars (_log, _stem, _wood, pillar, basalt, deepslate)
     if (isPillarBlock(shortName)) {
       if (key === "axis") {
         const axis = val.toLowerCase();
@@ -241,7 +323,7 @@ export function javaToBedrockState(
       }
     }
 
-    // 6. Generic fallback
+    // 8. Generic fallback
     const lowerVal = val.toLowerCase();
     if (lowerVal === "true") {
       states[key] = { type: "byte", value: 1 };
@@ -269,15 +351,21 @@ export function bedrockToJavaState(
   state?: BlockState;
 } {
   const normalizedInput = normalizeBlockName(blockName);
-  const javaName =
+  let javaName =
     BEDROCK_TO_JAVA_BLOCK_NAMES[normalizedInput] ?? normalizedInput;
+  const shortInput = getShortName(javaName);
+
+  const state: BlockState = {};
+  if (isDoubleSlabBlock(shortInput)) {
+    javaName = javaName.replace(/_double_slab$/, "_slab");
+    state["type"] = "double";
+  }
+
   const shortName = getShortName(javaName);
 
   if (!bedrockStates || typeof bedrockStates !== "object") {
-    return { name: javaName };
+    return Object.keys(state).length > 0 ? { name: javaName, state } : { name: javaName };
   }
-
-  const state: BlockState = {};
 
   for (const [rawKey, rawEntry] of Object.entries(bedrockStates)) {
     if (rawEntry === undefined || rawEntry === null) continue;
@@ -303,13 +391,18 @@ export function bedrockToJavaState(
     if (isSlabBlock(shortName)) {
       if (key === "minecraft:vertical_half" || key === "vertical_half") {
         const str = String(value).toLowerCase();
-        state["half"] =
-          str === "top" ? "top" : str === "double" ? "double" : "bottom";
+        if (str === "double") {
+          state["type"] = "double";
+        } else if (!("type" in state)) {
+          state["half"] = str === "top" ? "top" : "bottom";
+        }
         continue;
       }
       if (key === "top_slot_bit") {
-        const bit = toBooleanByte(value as string | number | boolean);
-        state["half"] = bit === 1 ? "top" : "bottom";
+        if (!("type" in state)) {
+          const bit = toBooleanByte(value as string | number | boolean);
+          state["half"] = bit === 1 ? "top" : "bottom";
+        }
         continue;
       }
     }
@@ -338,7 +431,45 @@ export function bedrockToJavaState(
       }
     }
 
-    // 4. Lanterns (lantern, soul_lantern)
+    // 4. Trapdoors (_trapdoor)
+    if (isTrapdoorBlock(shortName)) {
+      if (key === "direction") {
+        const num = Number(value);
+        state["facing"] = DIRECTION_TO_TRAPDOOR_FACING[num] ?? "north";
+        continue;
+      }
+      if (key === "upside_down_bit") {
+        const bit = toBooleanByte(value as string | number | boolean);
+        state["half"] = bit === 1 ? "top" : "bottom";
+        continue;
+      }
+      if (key === "open_bit") {
+        const bit = toBooleanByte(value as string | number | boolean);
+        state["open"] = bit === 1 ? "true" : "false";
+        continue;
+      }
+    }
+
+    // 5. Beds (_bed)
+    if (isBedBlock(shortName)) {
+      if (key === "direction") {
+        const num = Number(value);
+        state["facing"] = DIRECTION_TO_BED_FACING[num] ?? "north";
+        continue;
+      }
+      if (key === "head_piece_bit") {
+        const bit = toBooleanByte(value as string | number | boolean);
+        state["part"] = bit === 1 ? "head" : "foot";
+        continue;
+      }
+      if (key === "occupied_bit") {
+        const bit = toBooleanByte(value as string | number | boolean);
+        state["occupied"] = bit === 1 ? "true" : "false";
+        continue;
+      }
+    }
+
+    // 6. Lanterns (lantern, soul_lantern)
     if (isLanternBlock(shortName)) {
       if (key === "hanging") {
         const bit = toBooleanByte(value as string | number | boolean);
@@ -347,7 +478,7 @@ export function bedrockToJavaState(
       }
     }
 
-    // 5. Logs / Pillars (_log, _stem, _wood, pillar, basalt, deepslate)
+    // 7. Logs / Pillars (_log, _stem, _wood, pillar, basalt, deepslate)
     if (isPillarBlock(shortName) || key === "pillar_axis") {
       if (key === "pillar_axis") {
         const axis = String(value).toLowerCase();
@@ -357,7 +488,7 @@ export function bedrockToJavaState(
       }
     }
 
-    // 6. Generic fallback
+    // 8. Generic fallback
     if (typeof value === "boolean") {
       state[key] = value ? "true" : "false";
     } else if (
