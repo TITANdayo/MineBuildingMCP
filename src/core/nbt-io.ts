@@ -74,9 +74,11 @@ function parseMcstructureFromNbt(parsed: nbtNamespace.NBT): VoxelWorld {
     ) ||
     !simplified.structure ||
     typeof simplified.structure !== "object" ||
+    Array.isArray(simplified.structure) ||
     !Array.isArray(simplified.structure.block_indices) ||
     !simplified.structure.palette ||
-    typeof simplified.structure.palette !== "object"
+    typeof simplified.structure.palette !== "object" ||
+    Array.isArray(simplified.structure.palette)
   ) {
     throw new Error(
       "Invalid .mcstructure data: missing valid size [x, y, z], structure.block_indices, or structure.palette."
@@ -323,11 +325,26 @@ export async function parseStructureNbtBuffer(
     return parseMcstructureFromNbt(parsed);
   }
 
-  const rawSize = simplified.size ?? [32, 32, 32];
+  if (
+    !simplified ||
+    typeof simplified !== "object" ||
+    !Array.isArray(simplified.size) ||
+    simplified.size.length !== 3 ||
+    simplified.size.some(
+      (d) => typeof d !== "number" || !Number.isFinite(d) || d <= 0
+    ) ||
+    !Array.isArray(simplified.palette) ||
+    !Array.isArray(simplified.blocks)
+  ) {
+    throw new Error(
+      "Invalid structure NBT data: missing valid size [x, y, z], palette, or blocks."
+    );
+  }
+
   const size: [number, number, number] = [
-    Number(rawSize[0] ?? 32),
-    Number(rawSize[1] ?? 32),
-    Number(rawSize[2] ?? 32),
+    Number(simplified.size[0]),
+    Number(simplified.size[1]),
+    Number(simplified.size[2]),
   ];
 
   const world = new VoxelWorld(size);

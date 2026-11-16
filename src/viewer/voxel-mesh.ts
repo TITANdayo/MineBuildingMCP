@@ -1278,28 +1278,37 @@ export function filterVoxelsForCutaway(
   let minBY = Infinity;
   const nonTerrainCoords = new Set<string>();
   const structuralByY = new Map<number, VoxelData[]>();
+  const allStructuralCoords = new Set<string>();
 
   for (const v of voxels) {
     if (!v.isTerrain) {
       if (v.y < minBY) {
         minBY = v.y;
       }
-      nonTerrainCoords.add(`${v.x},${v.y},${v.z}`);
-      if (!isCutawayExteriorProp(v.name) && v.y <= cutY) {
-        let list = structuralByY.get(v.y);
-        if (!list) {
-          list = [];
-          structuralByY.set(v.y, list);
+      const key = `${v.x},${v.y},${v.z}`;
+      nonTerrainCoords.add(key);
+      if (!isCutawayExteriorProp(v.name)) {
+        allStructuralCoords.add(key);
+        if (v.y <= cutY) {
+          let list = structuralByY.get(v.y);
+          if (!list) {
+            list = [];
+            structuralByY.set(v.y, list);
+          }
+          list.push(v);
         }
-        list.push(v);
       }
     }
   }
 
-  // Detect the main floor slab Y level below cutY so deep sloped foundations and floor rims are preserved.
-  // A floor level has interior blocks with air directly above (at y + 1) and structural walls above it.
-  let peelBaseY = minBY;
-  const yFloorStats: Array<{ y: number; coveredByAir: number; total: number }> = [];
+  // 1. Detect all qualifying floor slab Y levels below cutY.
+  // A floor slab has interior blocks with air directly above (y + 1) and walls standing on it (y + 1).
+  const yFloorStats: Array<{
+    y: number;
+    coveredByAir: number;
+    total: number;
+    nextYCount: number;
+  }> = [];
   let maxCoveredByAir = 0;
 
   for (const [y, list] of structuralByY.entries()) {
@@ -1313,21 +1322,83 @@ export function filterVoxelsForCutaway(
     if (coveredByAir > maxCoveredByAir) {
       maxCoveredByAir = coveredByAir;
     }
-    yFloorStats.push({ y, coveredByAir, total: list.length });
+    const nextYCount = structuralByY.get(y + 1)?.length ?? 0;
+    yFloorStats.push({ y, coveredByAir, total: list.length, nextYCount });
   }
 
+  yFloorStats.sort((a, b) => a.y - b.y);
+
+  const floorSlabYs: number[] = [];
   if (maxCoveredByAir >= 4) {
     const threshold = Math.max(4, maxCoveredByAir * 0.5);
-    yFloorStats.sort((a, b) => a.y - b.y);
-    for (const stat of yFloorStats) {
-      if (stat.coveredByAir >= threshold && stat.total >= 9) {
-        peelBaseY = stat.y;
-        break;
+    const primary =
+      yFloorStats.find(
+        (s) => s.coveredByAir >= threshold && s.total >= 9 && s.nextYCount >= 4
+      ) ?? yFloorStats.find((s) => s.coveredByAir >= threshold && s.total >= 9);
+    if (primary) {
+      floorSlabYs.push(primary.y);
+      for (const stat of yFloorStats) {
+        if (
+          stat.y >= primary.y + 3 &&
+          stat.total >= 9 &&
+          stat.nextYCount >= 4 &&
+          (stat.coveredByAir >= 4 ||
+            (stat.total <= 25 && stat.coveredByAir >= 2))
+        ) {
+          floorSlabYs.push(stat.y);
+        }
+      }
+    }
+  } else if (maxCoveredByAir >= 1) {
+    // Handles small furnished rooms (e.g., 4x4 tower on sloped terrain where coveredByAir is 1..3)
+    const primary = yFloorStats.find(
+      (s) => s.coveredByAir >= 1 && s.total >= 9 && s.nextYCount >= 4
+    );
+    if (primary) {
+      floorSlabYs.push(primary.y);
+      for (const stat of yFloorStats) {
+        if (
+          stat.y >= primary.y + 3 &&
+          stat.total >= 9 &&
+          stat.nextYCount >= 4 &&
+          stat.coveredByAir >= 2
+        ) {
+          floorSlabYs.push(stat.y);
+        }
       }
     }
   }
 
-  // Group non-terrain structural blocks above peelBaseY by (x, z) column (inspecting full height in voxels)
+  const floorSlabSet = new Set(floorSlabYs);
+  const lowestFloorY = floorSlabYs.length > 0 ? floorSlabYs[0] : Infinity;
+
+  interface StoryRange {
+    floorY: number;
+    minY: number;
+    maxY: number;
+    topY: number;
+  }
+
+  const stories: StoryRange[] = [];
+  if (floorSlabYs.length > 0) {
+    for (let i = 0; i < floorSlabYs.length; i++) {
+      const floorY = floorSlabYs[i];
+      const minY = floorY + 1;
+      const maxY =
+        i + 1 < floorSlabYs.length
+          ? Math.min(cutY, floorSlabYs[i + 1] - 1)
+          : cutY;
+      const topY =
+        i + 1 < floorSlabYs.length ? floorSlabYs[i + 1] - 1 : Infinity;
+      if (minY <= maxY) {
+        stories.push({ floorY, minY, maxY, topY });
+      }
+    }
+  } else if (Number.isFinite(minBY) && minBY <= cutY) {
+    stories.push({ floorY: minBY - 1, minY: minBY, maxY: cutY, topY: Infinity });
+  }
+
+  // 2. For each story, identify structural wall columns and compute per-Z / per-X outermost columns to peel.
   interface ColInfo {
     x: number;
     z: number;
@@ -1337,106 +1408,201 @@ export function filterVoxelsForCutaway(
     hasBase2: boolean;
   }
 
-  const colMap = new Map<string, ColInfo>();
-  for (const v of voxels) {
-    if (!v.isTerrain && v.y > peelBaseY && !isCutawayExteriorProp(v.name)) {
-      const key = `${v.x},${v.z}`;
-      let cur = colMap.get(key);
-      if (!cur) {
-        cur = {
-          x: v.x,
-          z: v.z,
-          belowCutCount: 0,
-          fullCount: 0,
-          hasBase1: false,
-          hasBase2: false,
-        };
-        colMap.set(key, cur);
-      }
-      cur.fullCount++;
-      if (v.y <= cutY) {
-        cur.belowCutCount++;
-      }
-      if (v.y === peelBaseY + 1) {
-        cur.hasBase1 = true;
-      } else if (v.y === peelBaseY + 2) {
-        cur.hasBase2 = true;
-      }
-    }
+  interface StoryPeelInfo {
+    minY: number;
+    maxY: number;
+    peelCoords: Set<string>;
   }
 
-  const allCols = Array.from(colMap.values()).filter((c) => c.belowCutCount > 0);
-  const baseTwoCols = allCols.filter((c) => c.hasBase1 && c.hasBase2);
-  const baseTallCols = allCols.filter((c) => c.hasBase1 && c.fullCount >= 2);
-  const fullTallCols = allCols.filter((c) => c.fullCount >= 2);
-  const baseOneCols = allCols.filter((c) => c.hasBase1);
+  const storyPeels: StoryPeelInfo[] = [];
 
-  const candidateCols =
-    baseTwoCols.length > 0
-      ? baseTwoCols
-      : baseTallCols.length > 0
-        ? baseTallCols
-        : fullTallCols.length > 0
-          ? fullTallCols
-          : baseOneCols.length > 0
-            ? baseOneCols
-            : allCols;
+  if (view) {
+    for (const story of stories) {
+      const colMap = new Map<string, ColInfo>();
+      for (const v of voxels) {
+        if (
+          !v.isTerrain &&
+          !isCutawayExteriorProp(v.name) &&
+          v.y >= story.minY &&
+          v.y <= story.topY
+        ) {
+          const key = `${v.x},${v.z}`;
+          let cur = colMap.get(key);
+          if (!cur) {
+            cur = {
+              x: v.x,
+              z: v.z,
+              belowCutCount: 0,
+              fullCount: 0,
+              hasBase1: false,
+              hasBase2: false,
+            };
+            colMap.set(key, cur);
+          }
+          cur.fullCount++;
+          if (v.y <= story.maxY) {
+            cur.belowCutCount++;
+          }
+          if (v.y === story.minY) {
+            cur.hasBase1 = true;
+          } else if (v.y === story.minY + 1) {
+            cur.hasBase2 = true;
+          }
+        }
+      }
 
-  let minBX = Infinity;
-  let maxBX = -Infinity;
-  let minBZ = Infinity;
-  let maxBZ = -Infinity;
+      const allCols = Array.from(colMap.values()).filter(
+        (c) => c.belowCutCount > 0
+      );
+      const baseTwoCols = allCols.filter((c) => c.hasBase1 && c.hasBase2);
+      const baseTallCols = allCols.filter(
+        (c) => c.hasBase1 && c.fullCount >= 2
+      );
+      const fullTallCols = allCols.filter((c) => c.fullCount >= 2);
 
-  if (candidateCols.length > 0) {
-    const xCounts = new Map<number, number>();
-    const zCounts = new Map<number, number>();
-    for (const c of candidateCols) {
-      xCounts.set(c.x, (xCounts.get(c.x) ?? 0) + 1);
-      zCounts.set(c.z, (zCounts.get(c.z) ?? 0) + 1);
-    }
+      // Require >= 4 tall structural wall columns (never peel isolated furniture on open platforms)
+      if (fullTallCols.length < 4) {
+        continue;
+      }
 
-    let maxXCount = 0;
-    for (const cnt of xCounts.values()) {
-      if (cnt > maxXCount) maxXCount = cnt;
-    }
-    let maxZCount = 0;
-    for (const cnt of zCounts.values()) {
-      if (cnt > maxZCount) maxZCount = cnt;
-    }
+      const rawCandidates =
+        baseTwoCols.length >= 4
+          ? baseTwoCols
+          : baseTallCols.length >= 4
+            ? baseTallCols
+            : fullTallCols;
 
-    const xThreshold =
-      maxXCount >= 4 ? Math.floor(maxXCount * 0.5) + 1 : Math.min(2, maxXCount);
-    const zThreshold =
-      maxZCount >= 4 ? Math.floor(maxZCount * 0.5) + 1 : Math.min(2, maxZCount);
+      let cMinX = Infinity;
+      let cMaxX = -Infinity;
+      let cMinZ = Infinity;
+      let cMaxZ = -Infinity;
+      for (const c of rawCandidates) {
+        if (c.x < cMinX) cMinX = c.x;
+        if (c.x > cMaxX) cMaxX = c.x;
+        if (c.z < cMinZ) cMinZ = c.z;
+        if (c.z > cMaxZ) cMaxZ = c.z;
+      }
+      if (cMaxX - cMinX < 2 || cMaxZ - cMinZ < 2) {
+        continue;
+      }
 
-    const wallXs = candidateCols
-      .filter((c) => (xCounts.get(c.x) ?? 0) >= xThreshold)
-      .map((c) => c.x);
-    const wallZs = candidateCols
-      .filter((c) => (zCounts.get(c.z) ?? 0) >= zThreshold)
-      .map((c) => c.z);
+      // Filter out isolated porch pillars (4-connected components of < 3 columns)
+      const candMap = new Map<string, ColInfo>();
+      for (const c of rawCandidates) {
+        candMap.set(`${c.x},${c.z}`, c);
+      }
+      const visited = new Set<string>();
+      const wallCols: ColInfo[] = [];
 
-    const xs = wallXs.length > 0 ? wallXs : candidateCols.map((c) => c.x);
-    const zs = wallZs.length > 0 ? wallZs : candidateCols.map((c) => c.z);
+      for (const [startKey, startCol] of candMap.entries()) {
+        if (visited.has(startKey)) continue;
+        visited.add(startKey);
+        const comp: ColInfo[] = [startCol];
+        let head = 0;
+        while (head < comp.length) {
+          const cur = comp[head++];
+          for (const [dx, dz] of [
+            [1, 0],
+            [-1, 0],
+            [0, 1],
+            [0, -1],
+          ]) {
+            const nKey = `${cur.x + dx},${cur.z + dz}`;
+            if (visited.has(nKey)) continue;
+            const nCol = candMap.get(nKey);
+            if (nCol) {
+              visited.add(nKey);
+              comp.push(nCol);
+            }
+          }
+        }
+        if (comp.length >= 3) {
+          for (const c of comp) {
+            wallCols.push(c);
+          }
+        }
+      }
 
-    for (const x of xs) {
-      if (x < minBX) minBX = x;
-      if (x > maxBX) maxBX = x;
-    }
-    for (const z of zs) {
-      if (z < minBZ) minBZ = z;
-      if (z > maxBZ) maxBZ = z;
-    }
-  }
+      if (wallCols.length < 4) {
+        continue;
+      }
 
-  // Fallback if all non-terrain blocks at/below cutY are at peelBaseY or props only
-  if (!Number.isFinite(minBX)) {
-    for (const v of voxels) {
-      if (!v.isTerrain && v.y <= cutY) {
-        if (v.x < minBX) minBX = v.x;
-        if (v.x > maxBX) maxBX = v.x;
-        if (v.z < minBZ) minBZ = v.z;
-        if (v.z > maxBZ) maxBZ = v.z;
+      const minXByZ = new Map<number, number>();
+      const maxXByZ = new Map<number, number>();
+      const minZByX = new Map<number, number>();
+      const maxZByX = new Map<number, number>();
+
+      for (const c of wallCols) {
+        const curMinX = minXByZ.get(c.z);
+        if (curMinX === undefined || c.x < curMinX) minXByZ.set(c.z, c.x);
+        const curMaxX = maxXByZ.get(c.z);
+        if (curMaxX === undefined || c.x > curMaxX) maxXByZ.set(c.z, c.x);
+        const curMinZ = minZByX.get(c.x);
+        if (curMinZ === undefined || c.z < curMinZ) minZByX.set(c.x, c.z);
+        const curMaxZ = maxZByX.get(c.x);
+        if (curMaxZ === undefined || c.z > curMaxZ) maxZByX.set(c.x, c.z);
+      }
+
+      // Helper: avoid punching a hole in the back wall when the front wall has an open doorway/window
+      const hasFrontLintelInDirection = (
+        x: number,
+        z: number,
+        dx: number,
+        dz: number
+      ): boolean => {
+        if (!nonTerrainCoords.has(`${x + dx},${story.floorY},${z + dz}`)) {
+          return false;
+        }
+        const maxScan = 32;
+        const maxCheckY = Math.min(story.minY + 5, story.topY);
+        for (let step = 2; step <= maxScan; step++) {
+          const tx = x + dx * step;
+          const tz = z + dz * step;
+          for (let y = story.minY + 1; y <= maxCheckY; y++) {
+            if (allStructuralCoords.has(`${tx},${y},${tz}`)) {
+              return true;
+            }
+          }
+        }
+        return false;
+      };
+
+      const peelCoords = new Set<string>();
+      for (const c of wallCols) {
+        let shouldPeel = false;
+        const isEastEdge =
+          c.x === maxXByZ.get(c.z) && !hasFrontLintelInDirection(c.x, c.z, 1, 0);
+        const isWestEdge =
+          c.x === minXByZ.get(c.z) &&
+          !hasFrontLintelInDirection(c.x, c.z, -1, 0);
+        const isNorthEdge =
+          c.z === minZByX.get(c.x) &&
+          !hasFrontLintelInDirection(c.x, c.z, 0, -1);
+        const isSouthEdge =
+          c.z === maxZByX.get(c.x) && !hasFrontLintelInDirection(c.x, c.z, 0, 1);
+
+        switch (view) {
+          case "NE":
+            shouldPeel = isEastEdge || isNorthEdge;
+            break;
+          case "SE":
+            shouldPeel = isEastEdge || isSouthEdge;
+            break;
+          case "SW":
+            shouldPeel = isWestEdge || isSouthEdge;
+            break;
+          case "NW":
+            shouldPeel = isWestEdge || isNorthEdge;
+            break;
+        }
+
+        if (shouldPeel) {
+          peelCoords.add(`${c.x},${c.z}`);
+        }
+      }
+
+      if (peelCoords.size > 0) {
+        storyPeels.push({ minY: story.minY, maxY: story.maxY, peelCoords });
       }
     }
   }
@@ -1446,20 +1612,14 @@ export function filterVoxelsForCutaway(
       return false;
     }
 
-    if (!v.isTerrain && v.y > peelBaseY && view && Number.isFinite(minBX)) {
-      switch (view) {
-        case "NE":
-          if (v.x === maxBX || v.z === minBZ) return false;
-          break;
-        case "SE":
-          if (v.x === maxBX || v.z === maxBZ) return false;
-          break;
-        case "SW":
-          if (v.x === minBX || v.z === maxBZ) return false;
-          break;
-        case "NW":
-          if (v.x === minBX || v.z === minBZ) return false;
-          break;
+    if (v.isTerrain || floorSlabSet.has(v.y) || v.y < lowestFloorY) {
+      return true;
+    }
+
+    const colKey = `${v.x},${v.z}`;
+    for (const sp of storyPeels) {
+      if (v.y >= sp.minY && v.y <= sp.maxY && sp.peelCoords.has(colKey)) {
+        return false;
       }
     }
 

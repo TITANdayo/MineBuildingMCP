@@ -634,9 +634,9 @@ export class VoxelWorld {
   private isWallAperture(x: number, y: number, z: number): boolean {
     if (this.voxels.has(VoxelWorld.coordKey(x, y, z))) return false;
 
-    // Must have a non-terrain lintel/header block directly above within 1..3 blocks
+    // Must have a non-terrain lintel/header block directly above within 1..4 blocks
     const hasLintelAt = (lx: number, ly: number, lz: number): boolean => {
-      for (let dy = 1; dy <= 3 && ly + dy < this.size[1]; dy++) {
+      for (let dy = 1; dy <= 4 && ly + dy < this.size[1]; dy++) {
         const above = this.voxels.get(VoxelWorld.coordKey(lx, ly + dy, lz));
         if (above && !above.isTerrain && !isInteriorFixtureBlock(above.name)) {
           return true;
@@ -651,9 +651,12 @@ export class VoxelWorld {
     const isWallPillarAt = (wx: number, wy: number, wz: number): boolean => {
       const v = this.voxels.get(VoxelWorld.coordKey(wx, wy, wz));
       if (!v || isInteriorFixtureBlock(v.name)) return false;
+      const vDown = this.voxels.get(VoxelWorld.coordKey(wx, wy - 1, wz));
+      if (v.isTerrain && (!vDown || isInteriorFixtureBlock(vDown.name))) {
+        return false;
+      }
       const vUp = this.voxels.get(VoxelWorld.coordKey(wx, wy + 1, wz));
       if (vUp && !isInteriorFixtureBlock(vUp.name)) return true;
-      const vDown = this.voxels.get(VoxelWorld.coordKey(wx, wy - 1, wz));
       return Boolean(vDown && !vDown.isTerrain && !isInteriorFixtureBlock(vDown.name));
     };
 
@@ -755,6 +758,137 @@ export class VoxelWorld {
       return checkTurnSide(lz, rz) || checkTurnSide(rz, lz);
     };
 
+    // Checks if an X-aligned corridor slice [lx..rx] at z is a T-junction (or 4-way) mouth
+    // opening into a 1- or 2-wide perpendicular cross-corridor along X.
+    const isCorridorTJunctionZ = (lx: number, rx: number): boolean => {
+      const prevEnclosed = isNarrowlyEnclosedSliceZ(z - 1, lx, rx);
+      const nextEnclosed = isNarrowlyEnclosedSliceZ(z + 1, lx, rx);
+      if (prevEnclosed === nextEnclosed) return false;
+
+      const openZ = prevEnclosed ? z + 1 : z - 1;
+      const dzTurn = openZ - z;
+
+      for (let ax = lx; ax <= rx; ax++) {
+        if (!isOpenAt(ax, y, openZ) || !hasLintelAt(ax, y, openZ)) {
+          return false;
+        }
+      }
+
+      const z1 = openZ + dzTurn;
+      if (isWallPillarAt(lx, y, z1) && isWallPillarAt(rx, y, z1)) {
+        return true;
+      }
+
+      for (let ax = lx; ax <= rx; ax++) {
+        if (!isOpenAt(ax, y, z1) || !hasLintelAt(ax, y, z1)) {
+          return false;
+        }
+      }
+      const z2 = openZ + 2 * dzTurn;
+      return isWallPillarAt(lx, y, z2) && isWallPillarAt(rx, y, z2);
+    };
+
+    // Checks if a Z-aligned corridor slice [lz..rz] at x is a T-junction (or 4-way) mouth
+    // opening into a 1- or 2-wide perpendicular cross-corridor along Z.
+    const isCorridorTJunctionX = (lz: number, rz: number): boolean => {
+      const prevEnclosed = isNarrowlyEnclosedSliceX(x - 1, lz, rz);
+      const nextEnclosed = isNarrowlyEnclosedSliceX(x + 1, lz, rz);
+      if (prevEnclosed === nextEnclosed) return false;
+
+      const openX = prevEnclosed ? x + 1 : x - 1;
+      const dxTurn = openX - x;
+
+      for (let az = lz; az <= rz; az++) {
+        if (!isOpenAt(openX, y, az) || !hasLintelAt(openX, y, az)) {
+          return false;
+        }
+      }
+
+      const x1 = openX + dxTurn;
+      if (isWallPillarAt(x1, y, lz) && isWallPillarAt(x1, y, rz)) {
+        return true;
+      }
+
+      for (let az = lz; az <= rz; az++) {
+        if (!isOpenAt(x1, y, az) || !hasLintelAt(x1, y, az)) {
+          return false;
+        }
+      }
+      const x2 = openX + 2 * dxTurn;
+      return isWallPillarAt(x2, y, lz) && isWallPillarAt(x2, y, rz);
+    };
+
+    // Checks if an X-aligned opening [lx..rx] at z leads into a shallow (1- or 2-deep) dead-end alcove
+    // enclosed by side walls and a solid back wall.
+    const isRecessedAlcoveZ = (lx: number, rx: number): boolean => {
+      const prevEnclosed = isNarrowlyEnclosedSliceZ(z - 1, lx, rx);
+      const nextEnclosed = isNarrowlyEnclosedSliceZ(z + 1, lx, rx);
+      if (prevEnclosed === nextEnclosed) return false;
+
+      const dz = nextEnclosed ? 1 : -1;
+      const z1 = z + dz;
+      for (let ax = lx + 1; ax <= rx - 1; ax++) {
+        if (!isOpenAt(ax, y, z1) || !hasLintelAt(ax, y, z1)) return false;
+      }
+      if (!isWallPillarAt(lx, y, z1) || !isWallPillarAt(rx, y, z1)) return false;
+
+      const z2 = z + 2 * dz;
+      let backWallAtZ2 = true;
+      for (let ax = lx + 1; ax <= rx - 1; ax++) {
+        if (!isWallPillarAt(ax, y, z2)) {
+          backWallAtZ2 = false;
+          break;
+        }
+      }
+      if (backWallAtZ2) return true;
+
+      for (let ax = lx + 1; ax <= rx - 1; ax++) {
+        if (!isOpenAt(ax, y, z2) || !hasLintelAt(ax, y, z2)) return false;
+      }
+      if (!isWallPillarAt(lx, y, z2) || !isWallPillarAt(rx, y, z2)) return false;
+
+      const z3 = z + 3 * dz;
+      for (let ax = lx + 1; ax <= rx - 1; ax++) {
+        if (!isWallPillarAt(ax, y, z3)) return false;
+      }
+      return true;
+    };
+
+    // Checks if a Z-aligned opening [lz..rz] at x leads into a shallow (1- or 2-deep) dead-end alcove.
+    const isRecessedAlcoveX = (lz: number, rz: number): boolean => {
+      const prevEnclosed = isNarrowlyEnclosedSliceX(x - 1, lz, rz);
+      const nextEnclosed = isNarrowlyEnclosedSliceX(x + 1, lz, rz);
+      if (prevEnclosed === nextEnclosed) return false;
+
+      const dx = nextEnclosed ? 1 : -1;
+      const x1 = x + dx;
+      for (let az = lz + 1; az <= rz - 1; az++) {
+        if (!isOpenAt(x1, y, az) || !hasLintelAt(x1, y, az)) return false;
+      }
+      if (!isWallPillarAt(x1, y, lz) || !isWallPillarAt(x1, y, rz)) return false;
+
+      const x2 = x + 2 * dx;
+      let backWallAtX2 = true;
+      for (let az = lz + 1; az <= rz - 1; az++) {
+        if (!isWallPillarAt(x2, y, az)) {
+          backWallAtX2 = false;
+          break;
+        }
+      }
+      if (backWallAtX2) return true;
+
+      for (let az = lz + 1; az <= rz - 1; az++) {
+        if (!isOpenAt(x2, y, az) || !hasLintelAt(x2, y, az)) return false;
+      }
+      if (!isWallPillarAt(x2, y, lz) || !isWallPillarAt(x2, y, rz)) return false;
+
+      const x3 = x + 3 * dx;
+      for (let az = lz + 1; az <= rz - 1; az++) {
+        if (!isWallPillarAt(x3, y, az)) return false;
+      }
+      return true;
+    };
+
     // Check 1-wide or 2-wide opening in an X-aligned wall (wall along X, passage along Z)
     const openZ = isOpenAt(x, y, z - 1) && isOpenAt(x, y, z + 1);
     if (openZ) {
@@ -765,7 +899,9 @@ export class VoxelWorld {
           isNarrowlyEnclosedSliceZ(z - 1, x - 1, x + 1) &&
           isNarrowlyEnclosedSliceZ(z + 1, x - 1, x + 1)
         ) &&
-        !isCorridorCornerTurnZ(x - 1, x + 1);
+        !isCorridorCornerTurnZ(x - 1, x + 1) &&
+        !isCorridorTJunctionZ(x - 1, x + 1) &&
+        !isRecessedAlcoveZ(x - 1, x + 1);
       const wall2XLeft =
         isWallPillarAt(x - 1, y, z) &&
         isOpenAt(x + 1, y, z) &&
@@ -774,7 +910,9 @@ export class VoxelWorld {
           isNarrowlyEnclosedSliceZ(z - 1, x - 1, x + 2) &&
           isNarrowlyEnclosedSliceZ(z + 1, x - 1, x + 2)
         ) &&
-        !isCorridorCornerTurnZ(x - 1, x + 2);
+        !isCorridorCornerTurnZ(x - 1, x + 2) &&
+        !isCorridorTJunctionZ(x - 1, x + 2) &&
+        !isRecessedAlcoveZ(x - 1, x + 2);
       const wall2XRight =
         isWallPillarAt(x - 2, y, z) &&
         isOpenAt(x - 1, y, z) &&
@@ -783,7 +921,9 @@ export class VoxelWorld {
           isNarrowlyEnclosedSliceZ(z - 1, x - 2, x + 1) &&
           isNarrowlyEnclosedSliceZ(z + 1, x - 2, x + 1)
         ) &&
-        !isCorridorCornerTurnZ(x - 2, x + 1);
+        !isCorridorCornerTurnZ(x - 2, x + 1) &&
+        !isCorridorTJunctionZ(x - 2, x + 1) &&
+        !isRecessedAlcoveZ(x - 2, x + 1);
       if (wall1X || wall2XLeft || wall2XRight) return true;
     }
 
@@ -797,7 +937,9 @@ export class VoxelWorld {
           isNarrowlyEnclosedSliceX(x - 1, z - 1, z + 1) &&
           isNarrowlyEnclosedSliceX(x + 1, z - 1, z + 1)
         ) &&
-        !isCorridorCornerTurnX(z - 1, z + 1);
+        !isCorridorCornerTurnX(z - 1, z + 1) &&
+        !isCorridorTJunctionX(z - 1, z + 1) &&
+        !isRecessedAlcoveX(z - 1, z + 1);
       const wall2ZNorth =
         isWallPillarAt(x, y, z - 1) &&
         isOpenAt(x, y, z + 1) &&
@@ -806,7 +948,9 @@ export class VoxelWorld {
           isNarrowlyEnclosedSliceX(x - 1, z - 1, z + 2) &&
           isNarrowlyEnclosedSliceX(x + 1, z - 1, z + 2)
         ) &&
-        !isCorridorCornerTurnX(z - 1, z + 2);
+        !isCorridorCornerTurnX(z - 1, z + 2) &&
+        !isCorridorTJunctionX(z - 1, z + 2) &&
+        !isRecessedAlcoveX(z - 1, z + 2);
       const wall2ZSouth =
         isWallPillarAt(x, y, z - 2) &&
         isOpenAt(x, y, z - 1) &&
@@ -815,7 +959,9 @@ export class VoxelWorld {
           isNarrowlyEnclosedSliceX(x - 1, z - 2, z + 1) &&
           isNarrowlyEnclosedSliceX(x + 1, z - 2, z + 1)
         ) &&
-        !isCorridorCornerTurnX(z - 2, z + 1);
+        !isCorridorCornerTurnX(z - 2, z + 1) &&
+        !isCorridorTJunctionX(z - 2, z + 1) &&
+        !isRecessedAlcoveX(z - 2, z + 1);
       if (wall1Z || wall2ZNorth || wall2ZSouth) return true;
     }
 
@@ -966,7 +1112,7 @@ export class VoxelWorld {
       return !isInteriorFixtureBlock(v.name);
     };
 
-    // Index only cells that have a non-terrain lintel (dy in 1..3) or potential ceiling (dy in 1..16)
+    // Index only cells that have a non-terrain lintel (dy in 1..4) or potential ceiling (dy in 1..16)
     // so sparse builds on large 256^3 worlds avoid O(span^3) scans over empty sky.
     const clampedMinBuildY = Math.max(0, minBuildY);
     const clampedMaxBuildY = Math.min(sizeY - 1, maxBuildY);
@@ -981,7 +1127,7 @@ export class VoxelWorld {
     for (const v of nonTerrainVoxels) {
       if (isInteriorFixtureBlock(v.name)) continue;
 
-      for (let dy = 1; dy <= 3; dy++) {
+      for (let dy = 1; dy <= 4; dy++) {
         const cy = v.y - dy;
         if (cy < clampedMinBuildY || cy > clampedMaxBuildY) continue;
         const cKey = VoxelWorld.coordKey(v.x, cy, v.z);
@@ -1021,19 +1167,33 @@ export class VoxelWorld {
       }
     }
 
-    // Helper: does (x, y, z) have a non-terrain ceiling/roof block above it?
-    const findCeilingBlockY = (x: number, y: number, z: number): number => {
+    // Helper: inspect column above (x, y, z) for a built ceiling or solid terrain obstruction.
+    // A terrain block beneath a built roof seals the column vertically (openSky: false) and acts
+    // as the local ceiling only when a non-terrain roof block exists above within 1..16 blocks.
+    const inspectColumnAbove = (
+      x: number,
+      y: number,
+      z: number
+    ): { ceilingY: number; openSky: boolean } => {
+      let terrainHitY = -1;
       for (let cy = y + 1; cy < sizeY && cy <= y + 16; cy++) {
         const v = this.voxels.get(VoxelWorld.coordKey(x, cy, z));
         if (v && !isInteriorFixtureBlock(v.name)) {
-          if (!v.isTerrain && !isDoorBlockName(v.name)) {
-            return cy;
+          if (isDoorBlockName(v.name)) {
+            return { ceilingY: -1, openSky: terrainHitY < 0 };
           }
-          // Hit terrain or door before a ceiling
-          return -1;
+          if (!v.isTerrain) {
+            return {
+              ceilingY: terrainHitY >= 0 ? terrainHitY : cy,
+              openSky: false,
+            };
+          }
+          if (terrainHitY < 0) {
+            terrainHitY = cy;
+          }
         }
       }
-      return -1;
+      return { ceilingY: -1, openSky: terrainHitY < 0 };
     };
 
     // Helper: is a block likely a standalone table/chair piece resting on a floor?
@@ -1115,7 +1275,7 @@ export class VoxelWorld {
 
         const onEdge =
           x === scanMinX || x === scanMaxX || z === scanMinZ || z === scanMaxZ;
-        let touchesOutsideAir = onEdge || findCeilingBlockY(x, y, z) < 0;
+        let touchesOutsideAir = onEdge || inspectColumnAbove(x, y, z).openSky;
 
         if (!touchesOutsideAir) {
           for (const [dx, dz] of cardinals2D) {
@@ -1252,7 +1412,7 @@ export class VoxelWorld {
 
         const floorBlockY = findFloorBlockY(x, y, z);
         if (floorBlockY < 0) continue;
-        const ceilingBlockY = findCeilingBlockY(x, y, z);
+        const ceilingBlockY = inspectColumnAbove(x, y, z).ceilingY;
         if (ceilingBlockY < 0) continue;
 
         const enclosedDirs = countEnclosedDirections(x, y, z);
@@ -1303,7 +1463,7 @@ export class VoxelWorld {
       rawComponents.push(comp);
     }
 
-    // Filter out tiny crevices and 1-block-thin wall-top strips under roof eaves
+    // Filter out tiny crevices (< 4 floor columns or < 4 cells), while allowing 1-wide corridors >= 4 blocks long
     const validComponents = rawComponents.filter((comp) => {
       const uniqueCols = new Set(comp.map((c) => `${c.x},${c.z}`));
       const minX = Math.min(...comp.map((c) => c.x));
@@ -1313,8 +1473,7 @@ export class VoxelWorld {
       return (
         uniqueCols.size >= 4 &&
         comp.length >= 4 &&
-        maxX - minX >= 1 &&
-        maxZ - minZ >= 1
+        (maxX - minX >= 1 || maxZ - minZ >= 1)
       );
     });
 

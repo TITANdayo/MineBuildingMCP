@@ -631,7 +631,11 @@ export class BuilderDSL {
         trimmedColor.endsWith("_bed") || trimmedColor.includes(":")
           ? normalizeBlockName(trimmedColor)
           : `minecraft:${trimmedColor}_bed`;
-      if (bedBlock === "minecraft:" || bedBlock === "minecraft:_bed") {
+      if (
+        bedBlock === "minecraft:" ||
+        bedBlock === "minecraft:_bed" ||
+        bedBlock.endsWith(":")
+      ) {
         bedBlock = "minecraft:red_bed";
       }
 

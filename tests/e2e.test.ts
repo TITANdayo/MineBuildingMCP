@@ -936,4 +936,337 @@ describe("MineBuildingMCP End-to-End Verification", () => {
     const blueCenterIdx = (64 * 128 + 64) * 4;
     expect(bluePng.data[blueCenterIdx + 2]).toBeGreaterThan(bluePng.data[blueCenterIdx] + 50);
   }, 45000);
+
+  it("13. Handles T-junctions, 1-wide corridors, alcoves, terrain-under-ceiling, 4-high doorways, NBT schema & placeBed(':')", async () => {
+    const nbtNs = await import("prismarine-nbt");
+    const nbt = (nbtNs as unknown as { default?: typeof nbtNs }).default ?? nbtNs;
+    const { parseMcstructureBuffer, parseStructureNbtBuffer } = await import("../src/core/nbt-io.js");
+    const { VoxelWorld } = await import("../src/core/voxel-world.js");
+
+    // 1. 4-high open doorway (headroom=4, lintel at y=6)
+    const door4World = new VoxelWorld([16, 12, 16]);
+    for (let x = 2; x <= 8; x++) {
+      for (let z = 2; z <= 8; z++) {
+        door4World.setVoxel(x, 1, z, "minecraft:stone_bricks", undefined, false, 1);
+        door4World.setVoxel(x, 6, z, "minecraft:stone_bricks", undefined, false, 1);
+        if (x === 2 || x === 8 || z === 2 || z === 8) {
+          for (let y = 2; y <= 5; y++) {
+            if (x === 5 && z === 2) continue;
+            door4World.setVoxel(x, y, z, "minecraft:oak_planks", undefined, false, 1);
+          }
+        }
+      }
+    }
+    door4World.setVoxel(5, 5, 5, "minecraft:lantern", { hanging: "true" }, false, 2);
+    const door4Report = door4World.detectInteriorRooms();
+    expect(door4Report.rooms.length).toBe(1);
+    expect(door4Report.rooms[0].volume).toBe(100);
+    expect(door4Report.rooms[0].doors.length).toBe(1);
+    expect(door4Report.validFlow).toBe(true);
+
+    // 2. 1-wide straight corridor (headroom=2, 9 cols -> vol=18)
+    const straight1World = new VoxelWorld([20, 10, 20]);
+    for (let x = 3; x <= 13; x++) {
+      for (let z = 5; z <= 7; z++) {
+        straight1World.setVoxel(x, 1, z, "minecraft:stone_bricks", undefined, false, 1);
+        straight1World.setVoxel(x, 4, z, "minecraft:stone_bricks", undefined, false, 1);
+        if (x === 3 || x === 13 || z === 5 || z === 7) {
+          straight1World.setVoxel(x, 2, z, "minecraft:oak_planks", undefined, false, 1);
+          straight1World.setVoxel(x, 3, z, "minecraft:oak_planks", undefined, false, 1);
+        }
+      }
+    }
+    straight1World.setVoxel(3, 2, 6, "minecraft:oak_door", { facing: "east", half: "lower" }, false, 2);
+    straight1World.setVoxel(3, 3, 6, "minecraft:oak_door", { facing: "east", half: "upper" }, false, 2);
+    straight1World.setVoxel(8, 2, 6, "minecraft:torch", undefined, false, 3);
+    const straight1Report = straight1World.detectInteriorRooms();
+    expect(straight1Report.rooms.length).toBe(1);
+    expect(straight1Report.rooms[0].volume).toBe(18);
+    expect(straight1Report.validFlow).toBe(true);
+
+    // 3. 2-wide T-junction corridor stays 1 unified room without false doorway_opening/unlit_room
+    const t2World = new VoxelWorld([24, 10, 24]);
+    const insideT2 = (x: number, z: number) =>
+      (x >= 4 && x <= 14 && z >= 6 && z <= 7) ||
+      (x >= 9 && x <= 10 && z >= 8 && z <= 13);
+    for (let x = 3; x <= 15; x++) {
+      for (let z = 5; z <= 14; z++) {
+        const inside = insideT2(x, z);
+        const adj = insideT2(x + 1, z) || insideT2(x - 1, z) || insideT2(x, z + 1) || insideT2(x, z - 1);
+        if (inside || adj) {
+          t2World.setVoxel(x, 1, z, "minecraft:stone_bricks", undefined, false, 1);
+          t2World.setVoxel(x, 4, z, "minecraft:stone_bricks", undefined, false, 1);
+          if (!inside) {
+            t2World.setVoxel(x, 2, z, "minecraft:oak_planks", undefined, false, 1);
+            t2World.setVoxel(x, 3, z, "minecraft:oak_planks", undefined, false, 1);
+          }
+        }
+      }
+    }
+    t2World.setVoxel(3, 2, 6, "minecraft:oak_door", { facing: "east", half: "lower" }, false, 2);
+    t2World.setVoxel(3, 3, 6, "minecraft:oak_door", { facing: "east", half: "upper" }, false, 2);
+    t2World.setVoxel(4, 2, 6, "minecraft:torch", undefined, false, 3);
+    const t2Report = t2World.detectInteriorRooms();
+    expect(t2Report.rooms.length).toBe(1);
+    expect(t2Report.rooms[0].volume).toBe(68);
+    expect(t2Report.rooms[0].doors.length).toBe(1);
+    expect(t2Report.validFlow).toBe(true);
+
+    // 4. 1-wide T-junction corridor stays 1 unified room
+    const t1World = new VoxelWorld([24, 10, 24]);
+    const insideT1 = (x: number, z: number) =>
+      (x >= 4 && x <= 14 && z === 6) ||
+      (x === 9 && z >= 7 && z <= 12);
+    for (let x = 3; x <= 15; x++) {
+      for (let z = 5; z <= 13; z++) {
+        const inside = insideT1(x, z);
+        const adj = insideT1(x + 1, z) || insideT1(x - 1, z) || insideT1(x, z + 1) || insideT1(x, z - 1);
+        if (inside || adj) {
+          t1World.setVoxel(x, 1, z, "minecraft:stone_bricks", undefined, false, 1);
+          t1World.setVoxel(x, 4, z, "minecraft:stone_bricks", undefined, false, 1);
+          if (!inside) {
+            t1World.setVoxel(x, 2, z, "minecraft:oak_planks", undefined, false, 1);
+            t1World.setVoxel(x, 3, z, "minecraft:oak_planks", undefined, false, 1);
+          }
+        }
+      }
+    }
+    t1World.setVoxel(3, 2, 6, "minecraft:oak_door", { facing: "east", half: "lower" }, false, 2);
+    t1World.setVoxel(3, 3, 6, "minecraft:oak_door", { facing: "east", half: "upper" }, false, 2);
+    t1World.setVoxel(4, 2, 6, "minecraft:torch", undefined, false, 3);
+    const t1Report = t1World.detectInteriorRooms();
+    expect(t1Report.rooms.length).toBe(1);
+    expect(t1Report.rooms[0].volume).toBe(34);
+    expect(t1Report.validFlow).toBe(true);
+
+    // 5. Recessed 2x2 alcove stays unified with main room
+    const alcoveWorld = new VoxelWorld([20, 10, 20]);
+    const insideAlcove = (x: number, z: number) =>
+      (x >= 3 && x <= 7 && z >= 3 && z <= 7) ||
+      (x >= 4 && x <= 5 && z >= 8 && z <= 10);
+    for (let x = 2; x <= 8; x++) {
+      for (let z = 2; z <= 12; z++) {
+        const inside = insideAlcove(x, z);
+        const adj = insideAlcove(x + 1, z) || insideAlcove(x - 1, z) || insideAlcove(x, z + 1) || insideAlcove(x, z - 1);
+        if (inside || adj) {
+          alcoveWorld.setVoxel(x, 1, z, "minecraft:stone_bricks", undefined, false, 1);
+          alcoveWorld.setVoxel(x, 5, z, "minecraft:stone_bricks", undefined, false, 1);
+          if (!inside) {
+            for (let y = 2; y <= 4; y++) {
+              alcoveWorld.setVoxel(x, y, z, "minecraft:oak_planks", undefined, false, 1);
+            }
+          }
+        }
+      }
+    }
+    alcoveWorld.setVoxel(5, 2, 2, "minecraft:oak_door", { facing: "south", half: "lower" }, false, 2);
+    alcoveWorld.setVoxel(5, 3, 2, "minecraft:oak_door", { facing: "south", half: "upper" }, false, 2);
+    alcoveWorld.setVoxel(5, 4, 5, "minecraft:lantern", { hanging: "true" }, false, 3);
+    const alcoveReport = alcoveWorld.detectInteriorRooms();
+    expect(alcoveReport.rooms.length).toBe(1);
+    expect(alcoveReport.rooms[0].floorPositions.length).toBe(31);
+
+    // 6. Terrain block under built ceiling does not shatter room
+    const terrainCeilWorld = new VoxelWorld([16, 12, 16]);
+    for (let x = 2; x <= 8; x++) {
+      for (let z = 2; z <= 8; z++) {
+        terrainCeilWorld.setVoxel(x, 1, z, "minecraft:stone_bricks", undefined, false, 1);
+        terrainCeilWorld.setVoxel(x, 5, z, "minecraft:stone_bricks", undefined, false, 1);
+        if (x === 2 || x === 8 || z === 2 || z === 8) {
+          for (let y = 2; y <= 4; y++) {
+            terrainCeilWorld.setVoxel(x, y, z, "minecraft:oak_planks", undefined, false, 1);
+          }
+        }
+      }
+    }
+    terrainCeilWorld.setVoxel(5, 2, 2, "minecraft:oak_door", { facing: "south", half: "lower" }, false, 2);
+    terrainCeilWorld.setVoxel(5, 3, 2, "minecraft:oak_door", { facing: "south", half: "upper" }, false, 2);
+    terrainCeilWorld.setVoxel(5, 4, 4, "minecraft:lantern", { hanging: "true" }, false, 3);
+    terrainCeilWorld.setVoxel(5, 4, 5, "minecraft:dirt", undefined, true, 0);
+    const terrainCeilReport = terrainCeilWorld.detectInteriorRooms();
+    expect(terrainCeilReport.rooms.length).toBe(1);
+    expect(terrainCeilReport.rooms[0].floorPositions.length).toBe(25);
+    expect(terrainCeilReport.rooms[0].volume).toBe(74);
+    expect(terrainCeilReport.validFlow).toBe(true);
+
+    // 7. Reject array palette in .mcstructure, reject unrelated NBT in parseStructureNbtBuffer, and placeBed(":") fallback
+    const arrayPaletteBuf = nbt.writeUncompressed(
+      nbt.comp(
+        {
+          format_version: nbt.int(1),
+          size: nbt.list(nbt.int([2, 2, 2])),
+          structure: nbt.comp({
+            block_indices: nbt.list(nbt.int([0])),
+            palette: nbt.list(nbt.int([1])),
+          }),
+        },
+        ""
+      ) as any,
+      "little"
+    );
+    await expect(parseMcstructureBuffer(arrayPaletteBuf)).rejects.toThrow(/Invalid \.mcstructure/);
+
+    const unrelatedNbtBuf = nbt.writeUncompressed(
+      nbt.comp({ hello: nbt.string("world") }, "") as any,
+      "big"
+    );
+    await expect(parseStructureNbtBuffer(unrelatedNbtBuf)).rejects.toThrow(/Invalid structure NBT/);
+
+    const bedWorld = new VoxelWorld([8, 8, 8]);
+    executeBuildScript(bedWorld, 'placeBed(3, 1, 3, "north", ":");', true);
+    expect(bedWorld.getVoxel(3, 1, 3)?.name).toBe("minecraft:red_bed");
+  });
+
+  it("14. Handles filterVoxelsForCutaway across 2-story, overhanging, L-shaped, bay window, recessed porch, open platform, and 4x4 sloped tower", async () => {
+    const { filterVoxelsForCutaway } = await import("../src/viewer/voxel-mesh.js");
+    const { VoxelWorld } = await import("../src/core/voxel-world.js");
+    const hasVoxel = (list: ReturnType<typeof filterVoxelsForCutaway>, x: number, y: number, z: number) =>
+      list.some((v) => v.x === x && v.y === y && v.z === z);
+
+    // 2A: Two-story house preserves 2nd floor slab perimeter and peels both stories' outer walls
+    const house2A = new VoxelWorld([28, 20, 28]);
+    for (let x = 12; x <= 18; x++) {
+      for (let z = 12; z <= 18; z++) {
+        house2A.setVoxel(x, 4, z, "minecraft:stone_bricks", undefined, false, 1);
+        house2A.setVoxel(x, 9, z, "minecraft:stone_bricks", undefined, false, 1);
+        house2A.setVoxel(x, 14, z, "minecraft:stone_bricks", undefined, false, 1);
+        if (x === 12 || x === 18 || z === 12 || z === 18) {
+          for (let y = 5; y <= 8; y++) house2A.setVoxel(x, y, z, "minecraft:oak_planks", undefined, false, 2);
+          for (let y = 10; y <= 13; y++) house2A.setVoxel(x, y, z, "minecraft:oak_planks", undefined, false, 2);
+        }
+      }
+    }
+    const cut2A = filterVoxelsForCutaway(house2A.getAllVoxels(), 12, "NE");
+    expect(hasVoxel(cut2A, 18, 9, 14)).toBe(true);
+    expect(hasVoxel(cut2A, 18, 6, 14)).toBe(false);
+    expect(hasVoxel(cut2A, 18, 11, 14)).toBe(false);
+    expect(hasVoxel(cut2A, 12, 11, 14)).toBe(true);
+
+    // 2F: Overhanging 2nd story peels overhanging 2nd-floor wall while keeping slab edge
+    const house2F = new VoxelWorld([28, 20, 28]);
+    for (let x = 10; x <= 16; x++) {
+      for (let z = 10; z <= 16; z++) {
+        house2F.setVoxel(x, 4, z, "minecraft:stone_bricks", undefined, false, 1);
+        if (x === 10 || x === 16 || z === 10 || z === 16) {
+          for (let y = 5; y <= 8; y++) house2F.setVoxel(x, y, z, "minecraft:oak_planks", undefined, false, 2);
+        }
+      }
+      for (let z = 9; z <= 16; z++) {
+        house2F.setVoxel(x, 9, z, "minecraft:stone_bricks", undefined, false, 1);
+        house2F.setVoxel(x, 14, z, "minecraft:stone_bricks", undefined, false, 1);
+        if (x === 10 || x === 16 || z === 9 || z === 16) {
+          for (let y = 10; y <= 13; y++) house2F.setVoxel(x, y, z, "minecraft:oak_planks", undefined, false, 2);
+        }
+      }
+    }
+    const cut2F = filterVoxelsForCutaway(house2F.getAllVoxels(), 12, "NE");
+    expect(hasVoxel(cut2F, 13, 11, 9)).toBe(false);
+    expect(hasVoxel(cut2F, 13, 6, 10)).toBe(false);
+    expect(hasVoxel(cut2F, 13, 9, 9)).toBe(true);
+
+    // 2B: L-shaped footprint across NE/SE/SW/NW
+    const house2B = new VoxelWorld([32, 16, 32]);
+    const insideL = (x: number, z: number) =>
+      (x >= 11 && x <= 21 && z >= 11 && z <= 15) ||
+      (x >= 11 && x <= 14 && z >= 15 && z <= 23);
+    for (let x = 10; x <= 22; x++) {
+      for (let z = 10; z <= 24; z++) {
+        const inside = insideL(x, z);
+        const wall = !inside && (insideL(x + 1, z) || insideL(x - 1, z) || insideL(x, z + 1) || insideL(x, z - 1) ||
+          insideL(x + 1, z + 1) || insideL(x - 1, z - 1) || insideL(x + 1, z - 1) || insideL(x - 1, z + 1));
+        if (inside || wall) {
+          house2B.setVoxel(x, 4, z, "minecraft:stone_bricks", undefined, false, 1);
+          house2B.setVoxel(x, 9, z, "minecraft:stone_bricks", undefined, false, 1);
+          if (wall) {
+            for (let y = 5; y <= 8; y++) house2B.setVoxel(x, y, z, "minecraft:oak_planks", undefined, false, 2);
+          }
+        }
+      }
+    }
+    const all2B = house2B.getAllVoxels();
+    const cut2BNE = filterVoxelsForCutaway(all2B, 7, "NE");
+    expect(hasVoxel(cut2BNE, 16, 6, 10)).toBe(false);
+    expect(hasVoxel(cut2BNE, 22, 6, 13)).toBe(false);
+    expect(hasVoxel(cut2BNE, 15, 6, 20)).toBe(false);
+    expect(hasVoxel(cut2BNE, 10, 6, 17)).toBe(true);
+    expect(hasVoxel(cut2BNE, 12, 6, 24)).toBe(true);
+    const cut2BSW = filterVoxelsForCutaway(all2B, 7, "SW");
+    expect(hasVoxel(cut2BSW, 10, 6, 17)).toBe(false);
+    expect(hasVoxel(cut2BSW, 12, 6, 24)).toBe(false);
+    expect(hasVoxel(cut2BSW, 19, 6, 16)).toBe(false);
+    expect(hasVoxel(cut2BSW, 22, 6, 13)).toBe(true);
+
+    // 2C: Bay window
+    const house2C = new VoxelWorld([28, 16, 28]);
+    for (let x = 10; x <= 20; x++) {
+      for (let z = 10; z <= 18; z++) {
+        house2C.setVoxel(x, 4, z, "minecraft:stone_bricks", undefined, false, 1);
+        house2C.setVoxel(x, 9, z, "minecraft:stone_bricks", undefined, false, 1);
+        if (x === 10 || x === 20 || z === 18 || (z === 10 && (x < 14 || x > 16))) {
+          for (let y = 5; y <= 8; y++) house2C.setVoxel(x, y, z, "minecraft:oak_planks", undefined, false, 2);
+        }
+      }
+    }
+    for (let x = 13; x <= 17; x++) {
+      house2C.setVoxel(x, 4, 9, "minecraft:stone_bricks", undefined, false, 1);
+      house2C.setVoxel(x, 9, 9, "minecraft:stone_bricks", undefined, false, 1);
+      for (let y = 5; y <= 8; y++) house2C.setVoxel(x, y, 9, "minecraft:oak_planks", undefined, false, 2);
+    }
+    const cut2C = filterVoxelsForCutaway(house2C.getAllVoxels(), 7, "NE");
+    expect(hasVoxel(cut2C, 15, 6, 9)).toBe(false);
+    expect(hasVoxel(cut2C, 11, 6, 10)).toBe(false);
+    expect(hasVoxel(cut2C, 19, 6, 10)).toBe(false);
+    expect(hasVoxel(cut2C, 20, 6, 14)).toBe(false);
+    expect(hasVoxel(cut2C, 10, 6, 14)).toBe(true);
+
+    // 2D: Recessed porch
+    const house2D = new VoxelWorld([28, 16, 28]);
+    for (let x = 10; x <= 20; x++) {
+      for (let z = 10; z <= 18; z++) {
+        if (x > 18 && z >= 12 && z <= 16) continue;
+        house2D.setVoxel(x, 4, z, "minecraft:stone_bricks", undefined, false, 1);
+        house2D.setVoxel(x, 9, z, "minecraft:stone_bricks", undefined, false, 1);
+        const isEastEdge = (x === 20 && (z <= 11 || z >= 17)) || (x === 18 && z >= 12 && z <= 16);
+        const isReturn = x === 19 && (z === 11 || z === 17);
+        if (x === 10 || z === 10 || z === 18 || isEastEdge || isReturn) {
+          for (let y = 5; y <= 8; y++) house2D.setVoxel(x, y, z, "minecraft:oak_planks", undefined, false, 2);
+        }
+      }
+    }
+    const cut2D = filterVoxelsForCutaway(house2D.getAllVoxels(), 7, "NE");
+    expect(hasVoxel(cut2D, 20, 6, 11)).toBe(false);
+    expect(hasVoxel(cut2D, 20, 6, 18)).toBe(false);
+    expect(hasVoxel(cut2D, 18, 6, 14)).toBe(false);
+    expect(hasVoxel(cut2D, 10, 6, 14)).toBe(true);
+
+    // 2E1: Flat 1-block platform + furniture keeps isolated furniture intact
+    const plat2E1 = new VoxelWorld([20, 12, 20]);
+    for (let x = 5; x <= 14; x++) {
+      for (let z = 5; z <= 14; z++) {
+        plat2E1.setVoxel(x, 4, z, "minecraft:stone_bricks", undefined, false, 1);
+      }
+    }
+    plat2E1.setVoxel(9, 5, 9, "minecraft:crafting_table", undefined, false, 2);
+    const cut2E1 = filterVoxelsForCutaway(plat2E1.getAllVoxels(), 6, "NE");
+    expect(hasVoxel(cut2E1, 5, 4, 5)).toBe(true);
+    expect(hasVoxel(cut2E1, 9, 5, 9)).toBe(true);
+
+    // 2E2: Small 4x4 furnished tower on sloped terrain preserves floor edge and furniture
+    const tower2E2 = await loadStructureNbt(sampleNbtPath);
+    executeBuildScript(
+      tower2E2,
+      [
+        'placeFoundation(12, 12, 15, 15, 14, "stone_bricks");',
+        'buildWall(12, 12, 15, 15, 4, "oak_planks", false);',
+        'setBlock(13, 15, 13, "chest");',
+        'setBlock(14, 15, 13, "crafting_table");',
+      ].join("\n"),
+      true
+    );
+    const cut2E2 = filterVoxelsForCutaway(tower2E2.getAllVoxels(), 17, "NE");
+    expect(hasVoxel(cut2E2, 15, 14, 13)).toBe(true);
+    expect(hasVoxel(cut2E2, 13, 14, 12)).toBe(true);
+    expect(hasVoxel(cut2E2, 15, 16, 13)).toBe(false);
+    expect(hasVoxel(cut2E2, 13, 15, 13)).toBe(true);
+  });
 });
