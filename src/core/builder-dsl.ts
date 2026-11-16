@@ -1,6 +1,8 @@
 import * as vm from "node:vm";
 import {
   BlockState,
+  CardinalDirection,
+  InteriorRoom,
   StructureEvaluation,
   TraceRecord,
 } from "../types/shared.js";
@@ -531,6 +533,480 @@ export class BuilderDSL {
   public getDistanceToGround(x: number, y: number, z: number): number {
     return this.world.getDistanceToGround(x, y, z);
   }
+
+  /**
+   * Detects all enclosed interior rooms in the current world.
+   */
+  public detectRooms(): InteriorRoom[] {
+    return this.world.detectInteriorRooms().rooms;
+  }
+
+  /**
+   * Returns a detected interior room by roomId (1-based), or the first room if omitted.
+   */
+  public getRoomById(roomId?: number): InteriorRoom | undefined {
+    const rooms = this.detectRooms();
+    if (rooms.length === 0) return undefined;
+    if (roomId === undefined) return rooms[0];
+    return rooms.find((r) => r.roomId === roomId);
+  }
+
+  /**
+   * Places a 2-block tall door (half="lower" at y, half="upper" at y+1).
+   */
+  public placeDoor(
+    x: number,
+    y: number,
+    z: number,
+    doorBlock = "minecraft:oak_door",
+    facing: "north" | "south" | "east" | "west" = "north"
+  ): void {
+    this.beginOperation("placeDoor", [x, y, z, doorBlock, facing]);
+    try {
+      const ix = Math.floor(x);
+      const iy = Math.floor(y);
+      const iz = Math.floor(z);
+      this.setBlockInternal(ix, iy, iz, doorBlock, {
+        facing,
+        half: "lower",
+      });
+      this.setBlockInternal(ix, iy + 1, iz, doorBlock, {
+        facing,
+        half: "upper",
+      });
+    } finally {
+      this.endOperation();
+    }
+  }
+
+  /**
+   * Places a light source (default "minecraft:lantern", with hanging="true" if hanging or if a solid block exists at y+1).
+   */
+  public placeLighting(
+    x: number,
+    y: number,
+    z: number,
+    lightBlock = "minecraft:lantern",
+    hanging?: boolean
+  ): void {
+    this.beginOperation("placeLighting", [x, y, z, lightBlock, hanging]);
+    try {
+      const ix = Math.floor(x);
+      const iy = Math.floor(y);
+      const iz = Math.floor(z);
+      const norm = normalizeBlockName(lightBlock);
+      const hasCeilingAbove = Boolean(this.world.getVoxel(ix, iy + 1, iz));
+      const isHanging = hanging !== undefined ? hanging : hasCeilingAbove;
+
+      if (norm.includes("lantern")) {
+        this.setBlockInternal(ix, iy, iz, norm, {
+          hanging: isHanging ? "true" : "false",
+        });
+      } else {
+        this.setBlockInternal(ix, iy, iz, norm);
+      }
+    } finally {
+      this.endOperation();
+    }
+  }
+
+  /**
+   * Places a 2-block bed (part="foot" at (x,y,z) and part="head" offset by facing).
+   */
+  public placeBed(
+    x: number,
+    y: number,
+    z: number,
+    facing: "north" | "south" | "east" | "west" = "north",
+    color = "red"
+  ): void {
+    this.beginOperation("placeBed", [x, y, z, facing, color]);
+    try {
+      const ix = Math.floor(x);
+      const iy = Math.floor(y);
+      const iz = Math.floor(z);
+
+      const trimmedColor = color.trim().toLowerCase();
+      const bedBlock =
+        trimmedColor.endsWith("_bed") || trimmedColor.includes(":")
+          ? normalizeBlockName(trimmedColor)
+          : `minecraft:${trimmedColor}_bed`;
+
+      let dx = 0;
+      let dz = -1;
+      if (facing === "south") {
+        dx = 0;
+        dz = 1;
+      } else if (facing === "east") {
+        dx = 1;
+        dz = 0;
+      } else if (facing === "west") {
+        dx = -1;
+        dz = 0;
+      }
+
+      this.setBlockInternal(ix, iy, iz, bedBlock, {
+        facing,
+        part: "foot",
+      });
+      this.setBlockInternal(ix + dx, iy, iz + dz, bedBlock, {
+        facing,
+        part: "head",
+      });
+    } finally {
+      this.endOperation();
+    }
+  }
+
+  /**
+   * Places a table (fence post at (x,y,z) with carpet/pressure_plate at (x,y+1,z), or a top-slab if fenceBlock is a slab).
+   */
+  public placeTable(
+    x: number,
+    y: number,
+    z: number,
+    fenceBlock = "minecraft:oak_fence",
+    carpetOrSlabBlock = "minecraft:brown_carpet"
+  ): void {
+    this.beginOperation("placeTable", [
+      x,
+      y,
+      z,
+      fenceBlock,
+      carpetOrSlabBlock,
+    ]);
+    try {
+      const ix = Math.floor(x);
+      const iy = Math.floor(y);
+      const iz = Math.floor(z);
+      const normBase = normalizeBlockName(fenceBlock);
+
+      if (normBase.endsWith("_slab")) {
+        this.setBlockInternal(ix, iy, iz, normBase, { type: "top" });
+      } else {
+        this.setBlockInternal(ix, iy, iz, normBase);
+        if (carpetOrSlabBlock && !this.world.getVoxel(ix, iy + 1, iz)) {
+          const normTop = normalizeBlockName(carpetOrSlabBlock);
+          if (normTop.endsWith("_slab")) {
+            this.setBlockInternal(ix, iy + 1, iz, normTop, { type: "bottom" });
+          } else {
+            this.setBlockInternal(ix, iy + 1, iz, normTop);
+          }
+        }
+      }
+    } finally {
+      this.endOperation();
+    }
+  }
+
+  /**
+   * Places a stair block as a chair with facing and half="bottom".
+   */
+  public placeChair(
+    x: number,
+    y: number,
+    z: number,
+    stairBlock = "minecraft:oak_stairs",
+    facing: "north" | "south" | "east" | "west" = "north"
+  ): void {
+    this.beginOperation("placeChair", [x, y, z, stairBlock, facing]);
+    try {
+      const ix = Math.floor(x);
+      const iy = Math.floor(y);
+      const iz = Math.floor(z);
+      this.setBlockInternal(ix, iy, iz, stairBlock, {
+        facing,
+        half: "bottom",
+      });
+    } finally {
+      this.endOperation();
+    }
+  }
+
+  /**
+   * Automatically furnishes a detected room with ceiling lighting, a central carpet/rug,
+   * and style-appropriate furniture along inner walls while avoiding doorway clearances.
+   */
+  public furnishRoom(
+    roomId?: number,
+    style: "living" | "bedroom" | "study" | "workshop" = "living"
+  ): void {
+    this.beginOperation("furnishRoom", [roomId, style]);
+    try {
+      const room = this.getRoomById(roomId);
+      if (!room) return;
+
+      const { floorY, center, floorPositions, innerWallPositions, doors } =
+        room;
+      const floorSet = new Set(floorPositions.map((fp) => `${fp.x},${fp.z}`));
+
+      // Build doorway clearance exclusion set (avoid placing any obstructing block near doors)
+      const doorClearanceSet = new Set<string>();
+      for (const d of doors) {
+        for (let dx = -2; dx <= 2; dx++) {
+          for (let dz = -2; dz <= 2; dz++) {
+            if (Math.abs(dx) + Math.abs(dz) <= 2) {
+              doorClearanceSet.add(`${d.x + dx},${d.z + dz}`);
+            }
+          }
+        }
+      }
+
+      // 1. Place ceiling lantern at room center (attached to ceiling block above if available)
+      let lanternY = room.ceilingY;
+      for (let cy = floorY + 1; cy <= room.bounds.maxY + 2; cy++) {
+        if (this.world.getVoxel(center.x, cy, center.z)) {
+          lanternY = cy - 1;
+          break;
+        }
+      }
+      if (lanternY > floorY && !this.world.getVoxel(center.x, lanternY, center.z)) {
+        this.placeLighting(center.x, lanternY, center.z, "minecraft:lantern", true);
+      } else if (!this.world.getVoxel(center.x, floorY, center.z)) {
+        this.placeLighting(center.x, floorY, center.z, "minecraft:lantern", false);
+      }
+
+      // Track occupied (x, z) floor cells so furniture pieces don't overwrite each other
+      const occupiedFloor = new Set<string>();
+      const isCellFreeForFurniture = (x: number, z: number): boolean => {
+        const key = `${x},${z}`;
+        if (!floorSet.has(key)) return false;
+        if (doorClearanceSet.has(key)) return false;
+        if (occupiedFloor.has(key)) return false;
+        const existing = this.world.getVoxel(x, floorY, z);
+        if (existing && !existing.name.includes("carpet")) return false;
+        return Boolean(this.world.getVoxel(x, floorY - 1, z));
+      };
+
+      const normalToFacing = (
+        normal: CardinalDirection
+      ): "north" | "south" | "east" | "west" => {
+        switch (normal) {
+          case "N":
+            return "north";
+          case "S":
+            return "south";
+          case "E":
+            return "east";
+          case "W":
+            return "west";
+        }
+      };
+
+      const normalToOffset = (normal: CardinalDirection): [number, number] => {
+        switch (normal) {
+          case "N":
+            return [0, -1];
+          case "S":
+            return [0, 1];
+          case "E":
+            return [1, 0];
+          case "W":
+            return [-1, 0];
+        }
+      };
+
+      // Deduplicate innerWallPositions by (x, z) keeping primary normal
+      const wallSpots: Array<{
+        x: number;
+        z: number;
+        normal: CardinalDirection;
+      }> = [];
+      const seenWallSpot = new Set<string>();
+      for (const wp of innerWallPositions) {
+        const k = `${wp.x},${wp.z}`;
+        if (seenWallSpot.has(k) || doorClearanceSet.has(k)) continue;
+        seenWallSpot.add(k);
+        wallSpots.push({ x: wp.x, z: wp.z, normal: wp.normal });
+      }
+
+      // 2. Place style-appropriate furniture along walls
+      if (style === "bedroom") {
+        // Place bed along a wall where both foot and head are free
+        let bedPlaced = false;
+        for (const spot of wallSpots) {
+          if (bedPlaced) break;
+          const [ox, oz] = normalToOffset(spot.normal);
+          // Foot at (spot.x + ox, spot.z + oz), head against wall at (spot.x, spot.z)
+          const footX = spot.x + ox;
+          const footZ = spot.z + oz;
+          const headFacingMap: Record<
+            CardinalDirection,
+            "north" | "south" | "east" | "west"
+          > = {
+            S: "north",
+            N: "south",
+            E: "west",
+            W: "east",
+          };
+          if (
+            isCellFreeForFurniture(spot.x, spot.z) &&
+            isCellFreeForFurniture(footX, footZ)
+          ) {
+            this.placeBed(
+              footX,
+              floorY,
+              footZ,
+              headFacingMap[spot.normal],
+              "red"
+            );
+            occupiedFloor.add(`${spot.x},${spot.z}`);
+            occupiedFloor.add(`${footX},${footZ}`);
+            bedPlaced = true;
+          }
+        }
+
+        // Place bookshelf and bedside table
+        for (const spot of wallSpots) {
+          if (isCellFreeForFurniture(spot.x, spot.z)) {
+            this.setBlockInternal(
+              spot.x,
+              floorY,
+              spot.z,
+              "minecraft:bookshelf"
+            );
+            occupiedFloor.add(`${spot.x},${spot.z}`);
+            break;
+          }
+        }
+        for (const spot of wallSpots) {
+          if (isCellFreeForFurniture(spot.x, spot.z)) {
+            this.placeTable(
+              spot.x,
+              floorY,
+              spot.z,
+              "minecraft:oak_fence",
+              "minecraft:white_carpet"
+            );
+            occupiedFloor.add(`${spot.x},${spot.z}`);
+            break;
+          }
+        }
+      } else if (style === "study") {
+        let bookshelvesPlaced = 0;
+        for (const spot of wallSpots) {
+          if (bookshelvesPlaced >= 2) break;
+          if (isCellFreeForFurniture(spot.x, spot.z)) {
+            this.setBlockInternal(
+              spot.x,
+              floorY,
+              spot.z,
+              "minecraft:bookshelf"
+            );
+            occupiedFloor.add(`${spot.x},${spot.z}`);
+            bookshelvesPlaced++;
+          }
+        }
+        // Desk + chair
+        for (const spot of wallSpots) {
+          const [ox, oz] = normalToOffset(spot.normal);
+          const chairX = spot.x + ox;
+          const chairZ = spot.z + oz;
+          if (
+            isCellFreeForFurniture(spot.x, spot.z) &&
+            isCellFreeForFurniture(chairX, chairZ)
+          ) {
+            this.placeTable(
+              spot.x,
+              floorY,
+              spot.z,
+              "minecraft:oak_fence",
+              "minecraft:brown_carpet"
+            );
+            this.placeChair(
+              chairX,
+              floorY,
+              chairZ,
+              "minecraft:oak_stairs",
+              normalToFacing(spot.normal)
+            );
+            occupiedFloor.add(`${spot.x},${spot.z}`);
+            occupiedFloor.add(`${chairX},${chairZ}`);
+            break;
+          }
+        }
+      } else if (style === "workshop") {
+        const workshopBlocks = [
+          "minecraft:crafting_table",
+          "minecraft:furnace",
+          "minecraft:barrel",
+        ];
+        let bIdx = 0;
+        for (const spot of wallSpots) {
+          if (bIdx >= workshopBlocks.length) break;
+          if (isCellFreeForFurniture(spot.x, spot.z)) {
+            const blk = workshopBlocks[bIdx++];
+            if (blk === "minecraft:furnace") {
+              this.setBlockInternal(spot.x, floorY, spot.z, blk, {
+                facing: normalToFacing(spot.normal),
+              });
+            } else {
+              this.setBlockInternal(spot.x, floorY, spot.z, blk);
+            }
+            occupiedFloor.add(`${spot.x},${spot.z}`);
+          }
+        }
+      } else {
+        // Default "living" style: table + chair + bookshelf
+        for (const spot of wallSpots) {
+          const [ox, oz] = normalToOffset(spot.normal);
+          const chairX = spot.x + ox;
+          const chairZ = spot.z + oz;
+          if (
+            isCellFreeForFurniture(spot.x, spot.z) &&
+            isCellFreeForFurniture(chairX, chairZ)
+          ) {
+            this.placeTable(
+              spot.x,
+              floorY,
+              spot.z,
+              "minecraft:oak_fence",
+              "minecraft:brown_carpet"
+            );
+            this.placeChair(
+              chairX,
+              floorY,
+              chairZ,
+              "minecraft:oak_stairs",
+              normalToFacing(spot.normal)
+            );
+            occupiedFloor.add(`${spot.x},${spot.z}`);
+            occupiedFloor.add(`${chairX},${chairZ}`);
+            break;
+          }
+        }
+        for (const spot of wallSpots) {
+          if (isCellFreeForFurniture(spot.x, spot.z)) {
+            this.setBlockInternal(
+              spot.x,
+              floorY,
+              spot.z,
+              "minecraft:bookshelf"
+            );
+            occupiedFloor.add(`${spot.x},${spot.z}`);
+            break;
+          }
+        }
+      }
+
+      // 3. Place central carpet if center floor cell is free
+      const carpetColor =
+        style === "study"
+          ? "minecraft:green_carpet"
+          : style === "workshop"
+            ? "minecraft:gray_carpet"
+            : "minecraft:red_carpet";
+      if (
+        !occupiedFloor.has(`${center.x},${center.z}`) &&
+        !this.world.getVoxel(center.x, floorY, center.z) &&
+        this.world.getVoxel(center.x, floorY - 1, center.z)
+      ) {
+        this.setBlockInternal(center.x, floorY, center.z, carpetColor);
+      }
+    } finally {
+      this.endOperation();
+    }
+  }
 }
 
 export function executeBuildScript(
@@ -559,6 +1035,14 @@ export function executeBuildScript(
     line: dsl.line.bind(dsl),
     getSurfaceY: dsl.getSurfaceY.bind(dsl),
     getDistanceToGround: dsl.getDistanceToGround.bind(dsl),
+    detectRooms: dsl.detectRooms.bind(dsl),
+    getRoomById: dsl.getRoomById.bind(dsl),
+    placeDoor: dsl.placeDoor.bind(dsl),
+    placeLighting: dsl.placeLighting.bind(dsl),
+    placeBed: dsl.placeBed.bind(dsl),
+    placeTable: dsl.placeTable.bind(dsl),
+    placeChair: dsl.placeChair.bind(dsl),
+    furnishRoom: dsl.furnishRoom.bind(dsl),
   };
 
   // Keep line 1 of jsCode on line 1 of the compiled script so line numbers match 1-to-1

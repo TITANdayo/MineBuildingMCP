@@ -6,7 +6,9 @@ import { chromium, type Browser, type Page } from "playwright";
 import { createServer, type Logger, type ViteDevServer } from "vite";
 import { WebSocket, WebSocketServer } from "ws";
 import type {
+  CardinalDirection,
   InspectResult,
+  RenderInteriorRoomCamera,
   TraceRecord,
   ViewDirection,
   VoxelData,
@@ -463,7 +465,43 @@ export class WsBridge {
   }
 
   /**
-   * Queries the offscreen RGBA picking buffer at normalized coordinates `(u, v)` in `[0.0, 1.0]`.
+   * Requests Dollhouse Cutaway renders (`cutY` + camera-facing wall removal) and
+   * Room Eye-Level first-person renders, while synchronizing the offscreen ID picker
+   * buffer to the cutaway geometry.
+   */
+  public async renderInterior(
+    cutY: number,
+    rooms: RenderInteriorRoomCamera[] = [],
+    resolution = 512
+  ): Promise<{
+    cutY: number;
+    cutawayImages: Record<ViewDirection, string>;
+    roomEyeImages: Record<number, Record<CardinalDirection, string>>;
+  }> {
+    await this.ensureClientConnected();
+
+    const id = randomUUID();
+    const request: Extract<WsRequest, { type: "RENDER_INTERIOR" }> = {
+      type: "RENDER_INTERIOR",
+      id,
+      resolution,
+      cutY,
+      rooms,
+    };
+
+    const response = await this.sendRequestWithRetry<
+      Extract<WsResponse, { type: "RENDER_INTERIOR_RESULT" }>
+    >(request, "RENDER_INTERIOR_RESULT", false);
+
+    return {
+      cutY: response.cutY,
+      cutawayImages: response.cutawayImages,
+      roomEyeImages: response.roomEyeImages ?? {},
+    };
+  }
+
+  /**
+   * Queries the offscreen RGBA picking buffer at normalized or integer coordinates `(u, v)`.
    */
   public async inspectPixel(
     view: ViewDirection,

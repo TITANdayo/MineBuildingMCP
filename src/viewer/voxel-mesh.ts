@@ -1,5 +1,5 @@
 import * as THREE from "three";
-import type { BlockState, VoxelData } from "../types/shared.js";
+import type { BlockState, ViewDirection, VoxelData } from "../types/shared.js";
 
 export interface BoxPart {
   cx: number;
@@ -45,8 +45,27 @@ function getBaseBlockPalette(shortName: string): { base: [number, number, number
   if (shortName.includes("stone_brick")) return { base: [122, 125, 128], accent: [98, 101, 104] };
   if (shortName.includes("cobble")) return { base: [115, 115, 115], accent: [88, 88, 88] };
   if (shortName.includes("deepslate")) return { base: [72, 74, 79], accent: [54, 56, 61] };
+  if (shortName.includes("furnace") || shortName.includes("smoker") || shortName.includes("anvil")) {
+    return { base: [108, 110, 115], accent: [74, 76, 82] };
+  }
   if (shortName.includes("andesite") || shortName.includes("stone") || shortName.includes("gravel")) {
     return { base: [130, 132, 135], accent: [110, 112, 115] };
+  }
+  if (shortName.includes("bed")) return { base: [190, 52, 52], accent: [230, 224, 215] };
+  if (shortName.includes("bookshelf") || shortName.includes("lectern")) {
+    return { base: [152, 118, 68], accent: [78, 112, 148] };
+  }
+  if (shortName.includes("chest") || shortName.includes("barrel") || shortName.includes("crafting_table") || shortName.includes("table")) {
+    return { base: [168, 122, 62], accent: [122, 84, 38] };
+  }
+  if (shortName.includes("carpet") || shortName.includes("wool")) {
+    if (shortName.includes("red")) return { base: [176, 46, 38], accent: [148, 35, 28] };
+    if (shortName.includes("blue")) return { base: [58, 92, 170], accent: [44, 72, 142] };
+    if (shortName.includes("green")) return { base: [84, 128, 52], accent: [66, 104, 38] };
+    return { base: [224, 218, 206], accent: [196, 188, 174] };
+  }
+  if (shortName.includes("door") || shortName.includes("trapdoor")) {
+    return { base: [152, 114, 66], accent: [118, 86, 46] };
   }
   if (shortName.includes("spruce")) return { base: [114, 84, 48], accent: [92, 67, 37] };
   if (shortName.includes("dark_oak")) return { base: [66, 43, 20], accent: [51, 33, 15] };
@@ -54,18 +73,18 @@ function getBaseBlockPalette(shortName: string): { base: [number, number, number
   if (shortName.includes("oak_log") || shortName.includes("log") || shortName.includes("wood")) {
     return { base: [109, 85, 50], accent: [84, 65, 38] };
   }
-  if (shortName.includes("oak") || shortName.includes("plank") || shortName.includes("slab") || shortName.includes("stair")) {
+  if (shortName.includes("oak") || shortName.includes("plank") || shortName.includes("slab") || shortName.includes("stair") || shortName.includes("fence")) {
     return { base: [162, 130, 78], accent: [139, 110, 63] };
   }
   if (shortName.includes("brick")) return { base: [150, 74, 60], accent: [122, 56, 45] };
   if (shortName.includes("sand")) return { base: [219, 207, 163], accent: [199, 186, 141] };
   if (shortName.includes("water")) return { base: [45, 118, 224], accent: [36, 98, 196] };
   if (shortName.includes("glass")) return { base: [185, 226, 245], accent: [140, 198, 225] };
-  if (shortName.includes("leaf") || shortName.includes("leaves")) {
+  if (shortName.includes("leaf") || shortName.includes("leaves") || shortName.includes("potted") || shortName.includes("plant")) {
     return { base: [62, 128, 47], accent: [46, 102, 34] };
   }
-  if (shortName.includes("lantern") || shortName.includes("glow") || shortName.includes("torch")) {
-    return { base: [248, 202, 88], accent: [219, 148, 42] };
+  if (shortName.includes("lantern") || shortName.includes("glow") || shortName.includes("torch") || shortName.includes("lamp")) {
+    return { base: [250, 208, 92], accent: [224, 152, 42] };
   }
   if (shortName.includes("quartz") || shortName.includes("white") || shortName.includes("snow") || shortName.includes("calcite")) {
     return { base: [232, 229, 222], accent: [208, 204, 196] };
@@ -169,13 +188,199 @@ async function resolveBlockTexture(
 }
 
 /**
+ * Filters world voxels for Dollhouse Cutaway mode at height `cutY` and camera `view`:
+ * 1. Ceiling/Roof Cut: Hides all voxels with `voxel.y > cutY`.
+ * 2. Camera-Facing Outer Wall Cutaway: For non-terrain build blocks above floor level (`v.y > minBY`),
+ *    hides blocks on the two outer walls facing the camera direction (`NE`, `SE`, `SW`, `NW`) so
+ *    the interior floor, back walls, partitions, and furniture are clearly visible.
+ */
+export function filterVoxelsForCutaway(
+  voxels: VoxelData[],
+  cutY: number,
+  view?: ViewDirection
+): VoxelData[] {
+  let minBY = Infinity;
+  for (const v of voxels) {
+    if (!v.isTerrain && v.y < minBY) {
+      minBY = v.y;
+    }
+  }
+
+  // Compute outer wall X/Z perimeter of non-terrain build blocks at or below cutY
+  let minBX = Infinity;
+  let maxBX = -Infinity;
+  let minBZ = Infinity;
+  let maxBZ = -Infinity;
+
+  for (const v of voxels) {
+    if (!v.isTerrain && v.y > minBY && v.y <= cutY) {
+      if (v.x < minBX) minBX = v.x;
+      if (v.x > maxBX) maxBX = v.x;
+      if (v.z < minBZ) minBZ = v.z;
+      if (v.z > maxBZ) maxBZ = v.z;
+    }
+  }
+
+  // Fallback if all non-terrain blocks at/below cutY are at minBY
+  if (!Number.isFinite(minBX)) {
+    for (const v of voxels) {
+      if (!v.isTerrain && v.y <= cutY) {
+        if (v.x < minBX) minBX = v.x;
+        if (v.x > maxBX) maxBX = v.x;
+        if (v.z < minBZ) minBZ = v.z;
+        if (v.z > maxBZ) maxBZ = v.z;
+      }
+    }
+  }
+
+  return voxels.filter((v) => {
+    if (v.y > cutY) {
+      return false;
+    }
+
+    if (!v.isTerrain && v.y > minBY && view && Number.isFinite(minBX)) {
+      switch (view) {
+        case "NE":
+          if (v.x === maxBX || v.z === minBZ) return false;
+          break;
+        case "SE":
+          if (v.x === maxBX || v.z === maxBZ) return false;
+          break;
+        case "SW":
+          if (v.x === minBX || v.z === maxBZ) return false;
+          break;
+        case "NW":
+          if (v.x === minBX || v.z === minBZ) return false;
+          break;
+      }
+    }
+
+    return true;
+  });
+}
+
+/**
  * Computes the constituent 3D boxes for a voxel at (x, y, z) occupying [x, x+1] x [y, y+1] x [z, z+1].
- * Supports full cubes, slabs (bottom/top/double), and stairs (north/south/east/west, bottom/top).
+ * Supports full cubes, slabs, stairs, doors, trapdoors, lanterns, torches, beds, tables, carpets, and fences.
  */
 export function getVoxelBoxes(voxel: VoxelData): BoxPart[] {
   const { x, y, z } = voxel;
   const shortName = normalizeBlockName(voxel.name);
   const state: BlockState = voxel.state ?? {};
+
+  // Doors: thin 0.2 slab along the facing edge (or rotated when open)
+  if (shortName.includes("door") && !shortName.includes("trapdoor")) {
+    const facing = state.facing ?? "north";
+    switch (facing) {
+      case "south":
+        return [{ cx: x + 0.5, cy: y + 0.5, cz: z + 0.9, sx: 1.0, sy: 1.0, sz: 0.2 }];
+      case "east":
+        return [{ cx: x + 0.9, cy: y + 0.5, cz: z + 0.5, sx: 0.2, sy: 1.0, sz: 1.0 }];
+      case "west":
+        return [{ cx: x + 0.1, cy: y + 0.5, cz: z + 0.5, sx: 0.2, sy: 1.0, sz: 1.0 }];
+      case "north":
+      default:
+        return [{ cx: x + 0.5, cy: y + 0.5, cz: z + 0.1, sx: 1.0, sy: 1.0, sz: 0.2 }];
+    }
+  }
+
+  // Trapdoors: thin horizontal slab
+  if (shortName.includes("trapdoor")) {
+    const isTop = state.half === "top";
+    return [
+      {
+        cx: x + 0.5,
+        cy: isTop ? y + 0.9 : y + 0.1,
+        cz: z + 0.5,
+        sx: 1.0,
+        sy: 0.2,
+        sz: 1.0
+      }
+    ];
+  }
+
+  // Lanterns: compact centered 0.375 x 0.5 x 0.375 block
+  if (shortName.includes("lantern")) {
+    const isHanging = state.hanging === "true";
+    return [
+      {
+        cx: x + 0.5,
+        cy: isHanging ? y + 0.65 : y + 0.25,
+        cz: z + 0.5,
+        sx: 0.375,
+        sy: 0.5,
+        sz: 0.375
+      }
+    ];
+  }
+
+  // Torches / candles: compact upright post
+  if (shortName.includes("torch") || shortName.includes("candle")) {
+    return [
+      {
+        cx: x + 0.5,
+        cy: y + 0.3125,
+        cz: z + 0.5,
+        sx: 0.18,
+        sy: 0.625,
+        sz: 0.18
+      }
+    ];
+  }
+
+  // Beds: low 0.5625 height block
+  if (shortName.includes("bed") && !shortName.includes("bedrock")) {
+    return [
+      {
+        cx: x + 0.5,
+        cy: y + 0.28125,
+        cz: z + 0.5,
+        sx: 1.0,
+        sy: 0.5625,
+        sz: 1.0
+      }
+    ];
+  }
+
+  // Tables (or explicitly named table blocks other than full-cube crafting_table if desired): tabletop + pedestal
+  if (shortName.includes("table") && !shortName.includes("crafting_table") && !shortName.includes("enchanting_table")) {
+    return [
+      { cx: x + 0.5, cy: y + 0.875, cz: z + 0.5, sx: 1.0, sy: 0.25, sz: 1.0 },
+      { cx: x + 0.5, cy: y + 0.375, cz: z + 0.5, sx: 0.35, sy: 0.75, sz: 0.35 }
+    ];
+  }
+
+  // Carpets / pressure plates: thin floor layer
+  if (shortName.includes("carpet") || shortName.includes("pressure_plate")) {
+    return [
+      {
+        cx: x + 0.5,
+        cy: y + 0.04,
+        cz: z + 0.5,
+        sx: 1.0,
+        sy: 0.08,
+        sz: 1.0
+      }
+    ];
+  }
+
+  // Fences / posts / chains / bars: centered post
+  if (
+    shortName.includes("fence") ||
+    shortName.includes("chain") ||
+    shortName.includes("iron_bars")
+  ) {
+    return [
+      {
+        cx: x + 0.5,
+        cy: y + 0.5,
+        cz: z + 0.5,
+        sx: 0.35,
+        sy: 1.0,
+        sz: 0.35
+      }
+    ];
+  }
 
   // Stairs: bottom half-slab + top rear half-step (or inverted if half === "top")
   if (shortName.includes("stairs")) {

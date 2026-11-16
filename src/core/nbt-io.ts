@@ -2,9 +2,15 @@ import * as fs from "node:fs/promises";
 import * as zlib from "node:zlib";
 import * as nbt from "prismarine-nbt";
 import { BlockState } from "../types/shared.js";
+import {
+  BedrockStateMap,
+  bedrockToJavaState,
+  javaToBedrockState,
+} from "./state-translator.js";
 import { isAirBlock, normalizeBlockName, VoxelWorld } from "./voxel-world.js";
 
-const DEFAULT_DATA_VERSION = 3953; // Minecraft 1.21
+const DEFAULT_DATA_VERSION = 3953; // Minecraft 1.21 (Java)
+const DEFAULT_BEDROCK_BLOCK_VERSION = 18090528; // Minecraft 1.21 (Bedrock)
 
 interface SimplifiedPaletteEntry {
   Name: string;
@@ -21,13 +27,279 @@ interface SimplifiedStructureNbt {
   palette?: SimplifiedPaletteEntry[];
   blocks?: SimplifiedBlockEntry[];
   DataVersion?: number;
+  format_version?: number;
+  structure?: {
+    block_indices?: number[][];
+    palette?: Record<
+      string,
+      {
+        block_palette?: Array<{
+          name?: string;
+          states?: Record<string, unknown>;
+          version?: number;
+        }>;
+      }
+    >;
+  };
+}
+
+function isMcstructureRoot(rootValue: Record<string, unknown>): boolean {
+  if (!rootValue || typeof rootValue !== "object") return false;
+  if ("format_version" in rootValue && "structure" in rootValue) {
+    return true;
+  }
+  const structure = rootValue.structure as Record<string, unknown> | undefined;
+  if (structure && typeof structure === "object") {
+    if ("block_indices" in structure || "value" in structure) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function parseMcstructureFromNbt(parsed: nbt.NBT): VoxelWorld {
+  const simplified = nbt.simplify(parsed) as SimplifiedStructureNbt;
+
+  const rawSize = simplified.size ?? [32, 32, 32];
+  const sizeX = Math.max(1, Number(rawSize[0] ?? 32));
+  const sizeY = Math.max(1, Number(rawSize[1] ?? 32));
+  const sizeZ = Math.max(1, Number(rawSize[2] ?? 32));
+  const size: [number, number, number] = [sizeX, sizeY, sizeZ];
+
+  const world = new VoxelWorld(size);
+
+  // Extract raw block_palette from unsimplified NBT if available so state tag types (byte vs int vs string) are preserved
+  const rawRoot = parsed.value as Record<string, any>;
+  const rawStructure = rawRoot?.structure?.value as Record<string, any> | undefined;
+  const rawPaletteGroup = rawStructure?.palette?.value as
+    | Record<string, any>
+    | undefined;
+  const rawDefaultPalette =
+    rawPaletteGroup?.default?.value ??
+    (rawPaletteGroup
+      ? (Object.values(rawPaletteGroup)[0] as any)?.value
+      : undefined);
+  const rawBlockPaletteList: Array<Record<string, any>> | undefined =
+    rawDefaultPalette?.block_palette?.value?.value;
+
+  const palette: Array<{ name: string; state?: BlockState }> = [];
+
+  if (Array.isArray(rawBlockPaletteList)) {
+    for (const rawEntry of rawBlockPaletteList) {
+      const rawName = String(rawEntry?.name?.value ?? "minecraft:air");
+      const rawStates = rawEntry?.states?.value as
+        | Record<string, unknown>
+        | undefined;
+      palette.push(bedrockToJavaState(rawName, rawStates));
+    }
+  } else {
+    // Fallback to simplified palette
+    const simpPalettes = simplified.structure?.palette;
+    const simpDefault =
+      simpPalettes?.default ??
+      (simpPalettes ? Object.values(simpPalettes)[0] : undefined);
+    const simpBlockPalette = simpDefault?.block_palette ?? [];
+    for (const entry of simpBlockPalette) {
+      palette.push(
+        bedrockToJavaState(entry.name ?? "minecraft:air", entry.states)
+      );
+    }
+  }
+
+  const blockIndices = simplified.structure?.block_indices;
+  const layer0 = Array.isArray(blockIndices) && Array.isArray(blockIndices[0])
+    ? blockIndices[0]
+    : [];
+
+  if (layer0.length > 0) {
+    for (let x = 0; x < sizeX; x++) {
+      for (let y = 0; y < sizeY; y++) {
+        for (let z = 0; z < sizeZ; z++) {
+          const index = x * (sizeY * sizeZ) + y * sizeZ + z;
+          const paletteIdx = layer0[index];
+          if (paletteIdx === undefined || paletteIdx < 0) continue;
+          const paletteEntry = palette[paletteIdx];
+          if (!paletteEntry) continue;
+          if (isAirBlock(paletteEntry.name)) continue;
+
+          world.setVoxel(
+            x,
+            y,
+            z,
+            paletteEntry.name,
+            paletteEntry.state,
+            true,
+            0
+          );
+        }
+      }
+    }
+  }
+
+  world.saveInitialTerrainSnapshot();
+  return world;
+}
+
+export async function parseMcstructureBuffer(
+  buffer: Buffer
+): Promise<VoxelWorld> {
+  let parsed: nbt.NBT;
+  try {
+    const res = await nbt.parse(buffer, "little");
+    parsed = res.parsed;
+  } catch {
+    const res = await nbt.parse(buffer);
+    parsed = res.parsed;
+  }
+  return parseMcstructureFromNbt(parsed);
+}
+
+export async function serializeMcstructureBuffer(
+  world: VoxelWorld
+): Promise<Buffer> {
+  const [sizeX, sizeY, sizeZ] = world.size;
+  const totalVoxels = sizeX * sizeY * sizeZ;
+  const layer0 = new Array<number>(totalVoxels).fill(-1);
+  const layer1 = new Array<number>(totalVoxels).fill(-1);
+
+  const paletteMap = new Map<
+    string,
+    { index: number; bedrockName: string; bedrockStates: BedrockStateMap }
+  >();
+
+  // Always include minecraft:air at index 0 so empty structures have a valid non-empty Compound list
+  // and air blocks have a canonical palette entry if needed
+  const airTranslated = javaToBedrockState("minecraft:air");
+  paletteMap.set("minecraft:air", {
+    index: 0,
+    bedrockName: airTranslated.name,
+    bedrockStates: airTranslated.states,
+  });
+
+  // Fill layer0 with 0 (minecraft:air) by default, and overwrite with palette index for non-air blocks
+  layer0.fill(0);
+
+  for (let x = 0; x < sizeX; x++) {
+    for (let y = 0; y < sizeY; y++) {
+      for (let z = 0; z < sizeZ; z++) {
+        const voxel = world.getVoxel(x, y, z);
+        if (!voxel || isAirBlock(voxel.name)) {
+          continue;
+        }
+        const key = makePaletteKey(voxel.name, voxel.state);
+        let pEntry = paletteMap.get(key);
+        if (!pEntry) {
+          const translated = javaToBedrockState(voxel.name, voxel.state);
+          pEntry = {
+            index: paletteMap.size,
+            bedrockName: translated.name,
+            bedrockStates: translated.states,
+          };
+          paletteMap.set(key, pEntry);
+        }
+        const flatIndex = x * (sizeY * sizeZ) + y * sizeZ + z;
+        layer0[flatIndex] = pEntry.index;
+      }
+    }
+  }
+
+  const blockPaletteEntries = Array.from(paletteMap.values()).map((entry) => {
+    const statesCompound: Record<string, nbt.Tags[nbt.TagType]> = {};
+    for (const [k, v] of Object.entries(entry.bedrockStates)) {
+      if (v.type === "byte") {
+        statesCompound[k] = nbt.byte(Number(v.value));
+      } else if (v.type === "int") {
+        statesCompound[k] = nbt.int(Number(v.value));
+      } else {
+        statesCompound[k] = nbt.string(String(v.value));
+      }
+    }
+
+    return {
+      name: nbt.string(entry.bedrockName),
+      states: nbt.comp(statesCompound),
+      version: nbt.int(DEFAULT_BEDROCK_BLOCK_VERSION),
+    };
+  });
+
+  const rootTag = nbt.comp(
+    {
+      format_version: nbt.int(1),
+      size: nbt.list(nbt.int([sizeX, sizeY, sizeZ])),
+      structure_world_origin: nbt.list(nbt.int([0, 0, 0])),
+      structure: nbt.comp({
+        block_indices: {
+          type: nbt.TagType.List,
+          value: {
+            type: nbt.TagType.List,
+            value: [
+              { type: nbt.TagType.Int, value: layer0 },
+              { type: nbt.TagType.Int, value: layer1 },
+            ],
+          },
+        } as unknown as nbt.Tags[nbt.TagType],
+        entities: {
+          type: nbt.TagType.List,
+          value: {
+            type: "end",
+            value: [],
+          },
+        } as unknown as nbt.Tags[nbt.TagType],
+        palette: nbt.comp({
+          default: nbt.comp({
+            block_palette: {
+              type: nbt.TagType.List,
+              value: {
+                type: nbt.TagType.Compound,
+                value: blockPaletteEntries,
+              },
+            } as unknown as nbt.Tags[nbt.TagType],
+            block_position_data: nbt.comp({}),
+          }),
+        }),
+      }),
+    },
+    ""
+  ) as unknown as nbt.NBT;
+
+  return nbt.writeUncompressed(rootTag, "little");
+}
+
+export async function loadMcstructure(filePath: string): Promise<VoxelWorld> {
+  const buffer = await fs.readFile(filePath);
+  return parseMcstructureBuffer(buffer);
+}
+
+export async function saveMcstructure(
+  world: VoxelWorld,
+  filePath: string
+): Promise<void> {
+  const buffer = await serializeMcstructureBuffer(world);
+  await fs.writeFile(filePath, buffer);
 }
 
 export async function parseStructureNbtBuffer(
   buffer: Buffer
 ): Promise<VoxelWorld> {
-  const { parsed } = await nbt.parse(buffer);
+  let parsed: nbt.NBT;
+  try {
+    const res = await nbt.parse(buffer);
+    parsed = res.parsed;
+  } catch {
+    return parseMcstructureBuffer(buffer);
+  }
+
+  if (isMcstructureRoot(parsed.value as Record<string, unknown>)) {
+    return parseMcstructureFromNbt(parsed);
+  }
+
   const simplified = nbt.simplify(parsed) as SimplifiedStructureNbt;
+  if (
+    simplified.format_version !== undefined &&
+    simplified.structure?.block_indices !== undefined
+  ) {
+    return parseMcstructureFromNbt(parsed);
+  }
 
   const rawSize = simplified.size ?? [32, 32, 32];
   const size: [number, number, number] = [
@@ -75,6 +347,9 @@ export async function parseStructureNbtBuffer(
 }
 
 export async function loadStructureNbt(filePath: string): Promise<VoxelWorld> {
+  if (filePath.toLowerCase().endsWith(".mcstructure")) {
+    return loadMcstructure(filePath);
+  }
   const buffer = await fs.readFile(filePath);
   return parseStructureNbtBuffer(buffer);
 }
@@ -214,6 +489,10 @@ export async function saveStructureNbt(
   world: VoxelWorld,
   filePath: string
 ): Promise<void> {
+  if (filePath.toLowerCase().endsWith(".mcstructure")) {
+    await saveMcstructure(world, filePath);
+    return;
+  }
   const gzipped = await serializeStructureNbtBuffer(world);
   await fs.writeFile(filePath, gzipped);
 }

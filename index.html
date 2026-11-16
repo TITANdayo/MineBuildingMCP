@@ -240,6 +240,54 @@
         box-shadow: 0 0 12px rgba(56, 189, 248, 0.35);
       }
 
+      .cutaway-controls {
+        margin-top: 6px;
+        padding-top: 8px;
+        border-top: 1px solid var(--border-color);
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+      }
+
+      .cutaway-row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+
+      .cutaway-toggle-btn {
+        appearance: none;
+        background: var(--bg-subtle);
+        color: var(--text-secondary);
+        border: 1px solid var(--border-color);
+        border-radius: 7px;
+        padding: 5px 10px;
+        font-size: 11px;
+        font-weight: 600;
+        font-family: var(--font-mono);
+        cursor: pointer;
+        transition: all 0.15s ease;
+        white-space: nowrap;
+      }
+
+      .cutaway-toggle-btn:hover {
+        color: var(--text-primary);
+        border-color: rgba(245, 158, 11, 0.45);
+      }
+
+      .cutaway-toggle-btn.active {
+        color: #0b0f17;
+        background: var(--accent-amber);
+        border-color: var(--accent-amber);
+        box-shadow: 0 0 12px rgba(245, 158, 11, 0.35);
+      }
+
+      .cutaway-slider {
+        flex: 1;
+        accent-color: var(--accent-amber);
+        cursor: pointer;
+      }
+
       /* Inspector Panel */
       .inspector-panel {
         width: 380px;
@@ -376,6 +424,16 @@
             <button class="view-btn" data-view="SE">SE</button>
             <button class="view-btn" data-view="SW">SW</button>
             <button class="view-btn" data-view="NW">NW</button>
+          </div>
+          <div class="cutaway-controls">
+            <div class="panel-header">
+              <span>Dollhouse Cutaway</span>
+              <span id="cutaway-y-label" style="font-family: var(--font-mono); color: var(--accent-amber)">OFF</span>
+            </div>
+            <div class="cutaway-row">
+              <button id="cutaway-toggle-btn" class="cutaway-toggle-btn" type="button">Cutaway: OFF</button>
+              <input id="cutaway-y-slider" class="cutaway-slider" type="range" min="0" max="32" step="1" value="6" />
+            </div>
           </div>
         </div>
       </div>

@@ -27,7 +27,9 @@ import { executeBuildScript } from "../core/builder-dsl.js";
 import { loadStructureNbt, saveStructureNbt } from "../core/nbt-io.js";
 import { VoxelWorld } from "../core/voxel-world.js";
 import type {
+  CardinalDirection,
   InspectResult,
+  RenderInteriorRoomCamera,
   StructureEvaluation,
   TraceRecord,
   ViewDirection,
@@ -35,6 +37,7 @@ import type {
 import { WsBridge, type WsBridgeOptions } from "./ws-bridge.js";
 
 const VIEW_DIRECTIONS: ViewDirection[] = ["NE", "SE", "SW", "NW"];
+const CARDINAL_DIRECTIONS: CardinalDirection[] = ["N", "S", "E", "W"];
 
 /**
  * Creates a default 32x32x32 world with a flat grass/dirt/stone base (Y=0..3)
@@ -327,6 +330,92 @@ export class MineBuildingMcpServer {
     };
   }
 
+  public async handleInspectInterior(args: {
+    cutY?: number;
+    resolution?: number;
+  }): Promise<CallToolResult> {
+    const resolution =
+      typeof args?.resolution === "number" && Number.isFinite(args.resolution)
+        ? Math.max(64, Math.min(2048, Math.floor(args.resolution)))
+        : 512;
+
+    const analysis = this.world.detectInteriorRooms();
+    const cutY =
+      typeof args?.cutY === "number" && Number.isFinite(args.cutY)
+        ? Math.floor(args.cutY)
+        : analysis.suggestedCutY;
+
+    const roomCameras: RenderInteriorRoomCamera[] = analysis.rooms.map((r) => ({
+      roomId: r.roomId,
+      eyePosition: r.eyePosition,
+    }));
+
+    await this.syncCurrentWorldToViewer();
+    const renderRes = await this.wsBridge.renderInterior(cutY, roomCameras, resolution);
+
+    const payload = {
+      cutY: renderRes.cutY,
+      validFlow: analysis.validFlow,
+      roomsCount: analysis.rooms.length,
+      rooms: analysis.rooms.map((r) => ({
+        roomId: r.roomId,
+        floorY: r.floorY,
+        ceilingY: r.ceilingY,
+        center: r.center,
+        eyePosition: r.eyePosition,
+        bounds: r.bounds,
+        volume: r.volume,
+        lightingCount: r.lightingCount,
+        doors: r.doors,
+        innerWallCount: r.innerWallPositions.length,
+      })),
+      flowIssues: analysis.flowIssues,
+    };
+
+    const content: CallToolResult["content"] = [
+      {
+        type: "text",
+        text: `${analysis.summaryText}\n\nCutaway Height: cutY=${renderRes.cutY} (Offscreen ID Picker is now synchronized to this Dollhouse Cutaway! Call inspect_pixel(view, u, v) to inspect interior furniture, floors, and inner walls directly).\n\nJSON Details:\n${JSON.stringify(payload, null, 2)}`,
+      },
+    ];
+
+    for (const dir of VIEW_DIRECTIONS) {
+      const rawImage = renderRes.cutawayImages[dir];
+      if (rawImage) {
+        content.push({
+          type: "text",
+          text: `[Dollhouse Cutaway View: ${dir} at cutY=${renderRes.cutY} (${resolution}x${resolution}px) — pass view="${dir}" and u,v to inspect_pixel to reverse-lookup interior furniture & walls]`,
+        });
+        content.push({
+          type: "image",
+          mimeType: "image/png",
+          data: stripDataUrlPrefix(rawImage),
+        });
+      }
+    }
+
+    for (const room of analysis.rooms) {
+      const eyeMap = renderRes.roomEyeImages[room.roomId];
+      if (!eyeMap) continue;
+      for (const dir of CARDINAL_DIRECTIONS) {
+        const rawEye = eyeMap[dir];
+        if (rawEye) {
+          content.push({
+            type: "text",
+            text: `[Room #${room.roomId} Eye-Level View (${dir}) from (${room.eyePosition.x.toFixed(1)}, ${room.eyePosition.y.toFixed(1)}, ${room.eyePosition.z.toFixed(1)})]`,
+          });
+          content.push({
+            type: "image",
+            mimeType: "image/png",
+            data: stripDataUrlPrefix(rawEye),
+          });
+        }
+      }
+    }
+
+    return { content };
+  }
+
   public async handleExportStructure(args: {
     outputPath: string;
   }): Promise<CallToolResult> {
@@ -346,8 +435,13 @@ export class MineBuildingMcpServer {
       else buildVoxels++;
     }
 
+    const format = resolvedPath.toLowerCase().endsWith(".mcstructure")
+      ? "Bedrock Edition (.mcstructure)"
+      : "Java Edition (.nbt)";
+
     const resultSummary = {
       status: "exported",
+      format,
       outputPath: resolvedPath,
       size: this.world.size,
       totalVoxels,
@@ -359,7 +453,7 @@ export class MineBuildingMcpServer {
       content: [
         {
           type: "text",
-          text: `Successfully exported structure NBT to ${resolvedPath} (size: ${this.world.size.join("x")}, total voxels: ${totalVoxels}, build voxels: ${buildVoxels}, terrain voxels: ${terrainVoxels}).\n${JSON.stringify(resultSummary, null, 2)}`,
+          text: `Successfully exported structure (${format}) to ${resolvedPath} (size: ${this.world.size.join("x")}, total voxels: ${totalVoxels}, build voxels: ${buildVoxels}, terrain voxels: ${terrainVoxels}).\n${JSON.stringify(resultSummary, null, 2)}`,
         },
       ],
     };
@@ -372,13 +466,14 @@ export class MineBuildingMcpServer {
           {
             name: "load_terrain",
             description:
-              "Load a Minecraft Structure (.nbt) file as the initial terrain, sync it to the 3D viewer, and return a terrain heightmap & slope summary.",
+              "Load a Minecraft Structure file (Java Edition .nbt or Bedrock Edition .mcstructure) as the initial terrain, sync it to the 3D viewer, and return a terrain heightmap & slope summary.",
             inputSchema: {
               type: "object",
               properties: {
                 nbtPath: {
                   type: "string",
-                  description: "Path to the input Minecraft structure .nbt file",
+                  description:
+                    "Path to the input Minecraft structure file (.nbt or .mcstructure)",
                 },
               },
               required: ["nbtPath"],
@@ -387,14 +482,14 @@ export class MineBuildingMcpServer {
           {
             name: "run_build_script",
             description:
-              "Execute JavaScript building DSL code (setBlock, fillBox, clearArea, placeFoundation, buildWall, buildPitchedRoof, line, getSurfaceY, getDistanceToGround), evaluate floating blocks, sync to the 3D viewer, and return 4 orthographic PNG renders (NE, SE, SW, NW) with an operation trace table.",
+              "Execute JavaScript building DSL code (setBlock, fillBox, clearArea, placeFoundation, buildWall, buildPitchedRoof, line, placeDoor, placeLighting, placeBed, placeTable, placeChair, furnishRoom, detectRooms, getRoomById, getSurfaceY, getDistanceToGround), evaluate floating blocks, sync to the 3D viewer, and return 4 orthographic PNG renders (NE, SE, SW, NW) with an operation trace table.",
             inputSchema: {
               type: "object",
               properties: {
                 jsCode: {
                   type: "string",
                   description:
-                    "JavaScript code using the BuilderDSL functions to construct buildings on the voxel world.",
+                    "JavaScript code using the BuilderDSL functions to construct buildings and interiors on the voxel world.",
                 },
                 resolution: {
                   type: "number",
@@ -415,7 +510,7 @@ export class MineBuildingMcpServer {
           {
             name: "inspect_pixel",
             description:
-              "Inspect a specific pixel (u, v as integer pixel coordinates [0, resolution-1] or normalized [0.0, 1.0]) on one of the 4 rendered views (NE, SE, SW, NW) using the O(1) offscreen RGBA hardware ID picker. Returns exact 3D voxel coordinates, block name/state, distanceToGround, and the TraceRecord (opId, line number, codeSnippet) that placed the block.",
+              "Inspect a specific pixel (u, v as integer pixel coordinates [0, resolution-1] or normalized [0.0, 1.0]) on one of the 4 rendered views (NE, SE, SW, NW) using the O(1) offscreen RGBA hardware ID picker. Works on both exterior views and Dollhouse Cutaway interior views! Returns exact 3D voxel coordinates, block name/state, distanceToGround, and the TraceRecord (opId, line number, codeSnippet) that placed the block.",
             inputSchema: {
               type: "object",
               properties: {
@@ -439,15 +534,37 @@ export class MineBuildingMcpServer {
             },
           },
           {
+            name: "inspect_interior",
+            description:
+              "Automatically detect interior rooms, check interior flow & doorway clearance, render 4 Dollhouse Cutaway views (slicing above cutY and peeling back camera-facing outer walls while syncing the offscreen ID picker buffer), and render first-person Room Eye-Level views (N, S, E, W) from the center of each room.",
+            inputSchema: {
+              type: "object",
+              properties: {
+                cutY: {
+                  type: "number",
+                  description:
+                    "Optional Y coordinate ceiling cutoff for Dollhouse Cutaway views. Voxels above cutY are hidden. If omitted, automatically uses the detected room cutaway height.",
+                },
+                resolution: {
+                  type: "number",
+                  description:
+                    "Square image resolution in pixels for rendered views (default: 512).",
+                  default: 512,
+                },
+              },
+            },
+          },
+          {
             name: "export_structure",
             description:
-              "Export the current VoxelWorld (terrain + built structure) to a standard Gzipped Minecraft Structure (.nbt) file.",
+              "Export the current VoxelWorld (terrain + built structure) to either a Java Edition Structure (.nbt) file or a Bedrock Edition Structure (.mcstructure) file (automatically determined by file extension).",
             inputSchema: {
               type: "object",
               properties: {
                 outputPath: {
                   type: "string",
-                  description: "Destination file path for the exported .nbt file",
+                  description:
+                    "Destination file path for the exported structure (.nbt or .mcstructure)",
                 },
               },
               required: ["outputPath"],
@@ -484,6 +601,13 @@ export class MineBuildingMcpServer {
               view: String(args.view ?? "") as ViewDirection,
               u: Number(args.u),
               v: Number(args.v),
+            });
+
+          case "inspect_interior":
+            return await this.handleInspectInterior({
+              cutY: args.cutY !== undefined ? Number(args.cutY) : undefined,
+              resolution:
+                args.resolution !== undefined ? Number(args.resolution) : undefined,
             });
 
           case "export_structure":

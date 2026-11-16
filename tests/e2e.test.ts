@@ -247,8 +247,137 @@ describe("MineBuildingMCP End-to-End Verification", () => {
       const exportRes = await mcpServer.handleExportStructure({ outputPath: outPath });
       expect(exportRes.isError).toBeFalsy();
       expect(fs.existsSync(outPath)).toBe(true);
+
+      // 5. Interior Room Detection, Interior DSL, Dollhouse Cutaway & Eye-Level Renders + Cutaway Picker
+      const interiorScript = [
+        "// Line 1: Build an enclosed cottage with interior furniture and a blocked door test",
+        'placeFoundation(10, 10, 20, 20, 14, "stone_bricks");',
+        'buildWall(10, 10, 20, 20, 5, "oak_planks", false);',
+        'buildPitchedRoof(9, 9, 21, 21, 20, "oak_stairs", "NS");',
+        'placeDoor(15, 15, 10, "oak_door", "south");',
+        'placeLighting(15, 18, 15, "lantern", true);',
+        'placeBed(12, 15, 17, "north", "red");',
+        'placeTable(15, 15, 15, "oak_fence", "oak_pressure_plate");',
+        'placeChair(16, 15, 15, "oak_stairs", "west");',
+        'setBlock(15, 15, 11, "bookshelf");' // Line 10: intentionally blocks the inner side of the door at (15,15,10)!
+      ].join("\n");
+
+      const intBuildRes = await mcpServer.handleRunBuildScript({
+        jsCode: interiorScript,
+        resolution: 256,
+        resetBeforeRun: true
+      });
+      expect(intBuildRes.isError).toBeFalsy();
+
+      // Call inspect_interior with cutY=17 (slicing off the roof and upper walls)
+      const interiorRes = await mcpServer.handleInspectInterior({
+        cutY: 17,
+        resolution: 256
+      });
+      expect(interiorRes.isError).toBeFalsy();
+
+      const interiorSummaryText = (interiorRes.content[0] as { type: "text"; text: string }).text;
+      expect(interiorSummaryText).toContain("door_blocked");
+      expect(interiorSummaryText).toContain("Line 10");
+
+      // Should include: 1 report text + 4*(cutaway label + cutaway PNG) + 4*(room #1 eye-level label + PNG) = 17 items
+      expect(interiorRes.content.length).toBeGreaterThanOrEqual(17);
+
+      // Verify that after inspect_interior(cutY=17), inspect_pixel on NE view can directly pick
+      // interior blocks (at Y <= 17, inside x=11..19, z=11..19) that were previously hidden under the roof!
+      let pickedInteriorBlock: any = null;
+      for (let v = 60; v <= 200 && !pickedInteriorBlock; v += 6) {
+        for (let u = 60; u <= 200 && !pickedInteriorBlock; u += 6) {
+          const pickRes = await mcpServer.handleInspectPixel({ view: "NE", u, v });
+          const parsed = JSON.parse((pickRes.content[0] as { type: "text"; text: string }).text);
+          if (
+            parsed.hit &&
+            parsed.coord &&
+            parsed.coord.x >= 11 &&
+            parsed.coord.x <= 19 &&
+            parsed.coord.z >= 11 &&
+            parsed.coord.z <= 19 &&
+            parsed.coord.y >= 15 &&
+            parsed.coord.y <= 17 &&
+            !parsed.isTerrain
+          ) {
+            pickedInteriorBlock = parsed;
+          }
+        }
+      }
+      expect(pickedInteriorBlock).not.toBeNull();
+      expect(pickedInteriorBlock.trace).toBeDefined();
+      expect(pickedInteriorBlock.trace.line).toBeGreaterThanOrEqual(6);
+      expect(pickedInteriorBlock.trace.line).toBeLessThanOrEqual(10);
+
+      // 6. Export and reload as Bedrock Edition .mcstructure via MCP tools
+      const mcstructurePath = path.resolve(process.cwd(), "samples/test_exported_cottage.mcstructure");
+      const exportBedrockRes = await mcpServer.handleExportStructure({ outputPath: mcstructurePath });
+      expect(exportBedrockRes.isError).toBeFalsy();
+      expect(fs.existsSync(mcstructurePath)).toBe(true);
+
+      const reloadBedrockRes = await mcpServer.handleLoadTerrain({ nbtPath: mcstructurePath });
+      expect(reloadBedrockRes.isError).toBeFalsy();
+      if (fs.existsSync(mcstructurePath)) {
+        fs.unlinkSync(mcstructurePath);
+      }
     } finally {
       await mcpServer.close();
     }
-  }, 45000);
+  }, 60000);
+
+  it("6. Bidirectional Java <-> Bedrock block state translation & .mcstructure binary format verification", async () => {
+    const { javaToBedrockState, bedrockToJavaState } = await import("../src/core/state-translator.js");
+    const { serializeMcstructureBuffer, parseMcstructureBuffer } = await import("../src/core/nbt-io.js");
+    const { VoxelWorld } = await import("../src/core/voxel-world.js");
+
+    // 1. Verify Stairs state mapping (facing + half <-> weirdo_direction + upside_down_bit)
+    const bedrockStair = javaToBedrockState("minecraft:oak_stairs", {
+      facing: "north",
+      half: "top"
+    });
+    expect(bedrockStair.name).toBe("minecraft:oak_stairs");
+    expect(bedrockStair.states.weirdo_direction).toEqual({ type: "int", value: 3 });
+    expect(bedrockStair.states.upside_down_bit).toEqual({ type: "byte", value: 1 });
+
+    const roundtripStair = bedrockToJavaState(bedrockStair.name, bedrockStair.states);
+    expect(roundtripStair).toEqual({
+      name: "minecraft:oak_stairs",
+      state: { facing: "north", half: "top" }
+    });
+
+    // 2. Verify Slab state mapping (half <-> minecraft:vertical_half)
+    const bedrockSlab = javaToBedrockState("minecraft:stone_brick_slab", { half: "top" });
+    expect(bedrockSlab.states["minecraft:vertical_half"]).toEqual({
+      type: "string",
+      value: "top"
+    });
+    const roundtripSlab = bedrockToJavaState(bedrockSlab.name, bedrockSlab.states);
+    expect(roundtripSlab.state?.half).toBe("top");
+
+    // 3. Verify full VoxelWorld -> .mcstructure Buffer -> VoxelWorld roundtrip with ZYX indexing
+    const world = new VoxelWorld([8, 8, 8]);
+    world.setVoxel(1, 2, 3, "minecraft:oak_stairs", { facing: "west", half: "bottom" }, false, 1);
+    world.setVoxel(4, 5, 6, "minecraft:stone_brick_slab", { half: "top" }, false, 2);
+    world.setVoxel(2, 1, 5, "minecraft:lantern", { hanging: "true" }, false, 3);
+
+    const buf = await serializeMcstructureBuffer(world);
+    // Uncompressed Little-Endian NBT starts with tag type 0x0a (Compound), NOT gzip 0x1f 0x8b
+    expect(buf[0]).toBe(0x0a);
+
+    const parsedWorld = await parseMcstructureBuffer(buf);
+    expect(parsedWorld.size).toEqual([8, 8, 8]);
+    expect(parsedWorld.getVoxel(1, 2, 3)).toMatchObject({
+      name: "minecraft:oak_stairs",
+      state: { facing: "west", half: "bottom" }
+    });
+    expect(parsedWorld.getVoxel(4, 5, 6)).toMatchObject({
+      name: "minecraft:stone_brick_slab",
+      state: { half: "top" }
+    });
+    expect(parsedWorld.getVoxel(2, 1, 5)).toMatchObject({
+      name: "minecraft:lantern",
+      state: { hanging: "true" }
+    });
+  });
 });

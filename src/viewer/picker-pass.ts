@@ -100,6 +100,20 @@ export class OffscreenPickerPass {
     this.viewBuffers.clear();
   }
 
+  /**
+   * Updates the active interactive picker mesh geometry (e.g., when toggling Dollhouse Cutaway mode in browser UI)
+   * without clearing the full-world voxelMap or trace lookup table.
+   */
+  public setInteractiveGeometry(pickerGeometry: THREE.BufferGeometry): void {
+    if (this.pickerMesh) {
+      this.pickerMesh.geometry = pickerGeometry;
+    } else {
+      this.pickerMesh = new THREE.Mesh(pickerGeometry, this.pickerMaterial);
+      this.pickerMesh.frustumCulled = false;
+      this.pickerScene.add(this.pickerMesh);
+    }
+  }
+
   public getPickerMesh(): THREE.Mesh | null {
     return this.pickerMesh;
   }
@@ -114,18 +128,26 @@ export class OffscreenPickerPass {
 
   /**
    * Renders the unlit RGBA ID buffer for a specific camera view and caches its raw Uint8Array pixels.
+   * When `overrideGeometry` is provided (such as per-view Dollhouse Cutaway geometry), it renders
+   * that exact cutaway geometry into the picker buffer and caches it for `view`.
    */
   public renderViewBuffer(
     renderer: THREE.WebGLRenderer,
     view: ViewDirection,
     camera: THREE.Camera,
-    resolution: number
+    resolution: number,
+    overrideGeometry?: THREE.BufferGeometry
   ): Uint8Array {
     if (resolution !== this.currentResolution) {
       this.renderTarget.dispose();
       this.renderTarget = this.createTarget(resolution);
       this.currentResolution = resolution;
       this.viewBuffers.clear();
+    }
+
+    const prevGeometry = this.pickerMesh?.geometry;
+    if (overrideGeometry && this.pickerMesh) {
+      this.pickerMesh.geometry = overrideGeometry;
     }
 
     const prevTarget = renderer.getRenderTarget();
@@ -152,7 +174,10 @@ export class OffscreenPickerPass {
       byteBuffer
     );
 
-    // Restore renderer state
+    // Restore renderer and mesh state
+    if (overrideGeometry && this.pickerMesh && prevGeometry) {
+      this.pickerMesh.geometry = prevGeometry;
+    }
     renderer.setRenderTarget(prevTarget);
     renderer.toneMapping = prevToneMapping;
     renderer.autoClear = prevAutoClear;
