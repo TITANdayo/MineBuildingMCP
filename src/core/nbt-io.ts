@@ -122,6 +122,16 @@ function parseMcstructureFromNbt(parsed: nbtNamespace.NBT): VoxelWorld {
     const simpDefault =
       simpPalettes?.default ??
       (simpPalettes ? Object.values(simpPalettes)[0] : undefined);
+    if (
+      (rawDefaultPalette?.block_palette !== undefined &&
+        !Array.isArray(rawBlockPaletteList)) ||
+      (simpDefault?.block_palette !== undefined &&
+        !Array.isArray(simpDefault.block_palette))
+    ) {
+      throw new Error(
+        "Invalid .mcstructure data: missing valid structure.palette.default.block_palette list."
+      );
+    }
     const simpBlockPalette = simpDefault?.block_palette ?? [];
     for (const entry of simpBlockPalette) {
       palette.push(

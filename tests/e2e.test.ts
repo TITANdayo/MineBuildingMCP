@@ -1437,4 +1437,202 @@ describe("MineBuildingMCP End-to-End Verification", () => {
     expect(hasVoxel(cut3H2, 9, 6, 14)).toBe(true);
     expect(hasVoxel(cut3H2, 6, 6, 10)).toBe(true);
   });
+
+  it("16. Regression tests for 1-block floor objects (Adv A), non-List block_palette (Adv B), blocked virtual doorways (Adv C), placeBed(':_bed'), porch/eaves (Adv-5), terrain-floor 2-story (Adv-1), and furniture-dense 1F (Adv-2)", async () => {
+    const nbtNs = await import("prismarine-nbt");
+    const nbt = (nbtNs as unknown as { default?: typeof nbtNs }).default ?? nbtNs;
+    const { parseMcstructureBuffer } = await import("../src/core/nbt-io.js");
+    const { VoxelWorld } = await import("../src/core/voxel-world.js");
+    const { filterVoxelsForCutaway } = await import("../src/viewer/voxel-mesh.js");
+    const hasVoxel = (list: ReturnType<typeof filterVoxelsForCutaway>, x: number, y: number, z: number) =>
+      list.some((v) => v.x === x && v.y === y && v.z === z);
+
+    // 1. Adv A: 1-block floor objects (chair, fence table, wool, cobblestone) must NOT hallucinate doorways
+    for (const [blockName, expectedVol] of [
+      ["minecraft:oak_stairs", 75],
+      ["minecraft:oak_fence", 75],
+      ["minecraft:light_blue_wool", 72],
+      ["minecraft:cobblestone", 72],
+    ] as const) {
+      const advA = new VoxelWorld([15, 10, 15]);
+      for (let x = 3; x <= 9; x++) {
+        for (let z = 3; z <= 9; z++) {
+          advA.setVoxel(x, 0, z, "minecraft:stone_bricks", undefined, false, 1);
+          advA.setVoxel(x, 4, z, "minecraft:stone_bricks", undefined, false, 1);
+          if (x === 3 || x === 9 || z === 3 || z === 9) {
+            for (let y = 1; y <= 3; y++) {
+              advA.setVoxel(x, y, z, "minecraft:oak_planks", undefined, false, 1);
+            }
+          }
+        }
+      }
+      advA.setVoxel(6, 3, 6, "minecraft:lantern", { hanging: "true" }, false, 2);
+      advA.setVoxel(5, 1, 5, blockName, undefined, false, 3);
+      const repA = advA.detectInteriorRooms();
+      expect(repA.rooms.length).toBe(1);
+      expect(repA.rooms[0].doors).toEqual([]);
+      expect(repA.rooms[0].volume).toBe(expectedVol);
+      expect(repA.flowIssues.some((i) => i.type === "isolated_room")).toBe(true);
+      expect(repA.validFlow).toBe(false);
+    }
+
+    // 2. Adv B: Non-List structure.palette.default.block_palette throws clean Invalid .mcstructure error
+    for (const badPalette of [nbt.int(42), nbt.comp({ foo: nbt.string("bar") })]) {
+      const badMcBuf = nbt.writeUncompressed(
+        nbt.comp(
+          {
+            format_version: nbt.int(1),
+            size: nbt.list(nbt.int([2, 2, 2])),
+            structure: nbt.comp({
+              block_indices: nbt.list(nbt.list(nbt.int([0]))),
+              palette: nbt.comp({
+                default: nbt.comp({
+                  block_palette: badPalette as any,
+                }),
+              }),
+            }),
+          },
+          ""
+        ) as any,
+        "little"
+      );
+      await expect(parseMcstructureBuffer(badMcBuf)).rejects.toThrow(/Invalid \.mcstructure/);
+    }
+
+    // 3. Adv C: Blocked open doorway at floorY + 1 emits door_blocked and fails validFlow
+    const advC = new VoxelWorld([15, 10, 15]);
+    for (let x = 3; x <= 9; x++) {
+      for (let z = 3; z <= 9; z++) {
+        advC.setVoxel(x, 0, z, "minecraft:stone_bricks", undefined, false, 1);
+        advC.setVoxel(x, 4, z, "minecraft:stone_bricks", undefined, false, 1);
+        if (x === 3 || x === 9 || z === 3 || z === 9) {
+          for (let y = 1; y <= 3; y++) {
+            if (x === 6 && z === 3 && y <= 2) continue;
+            advC.setVoxel(x, y, z, "minecraft:oak_planks", undefined, false, 1);
+          }
+        }
+      }
+    }
+    advC.setVoxel(6, 3, 6, "minecraft:lantern", { hanging: "true" }, false, 2);
+    advC.setVoxel(6, 2, 3, "minecraft:cobblestone", undefined, false, 3);
+    const repC = advC.detectInteriorRooms();
+    expect(repC.rooms.length).toBe(1);
+    expect(repC.rooms[0].doors.some((d) => d.blocked)).toBe(true);
+    expect(repC.flowIssues.some((i) => i.type === "door_blocked")).toBe(true);
+    expect(repC.validFlow).toBe(false);
+
+    // 4. placeBed(":_bed") falls back to minecraft:red_bed
+    const bedEdgeWorld = new VoxelWorld([8, 8, 8]);
+    executeBuildScript(bedEdgeWorld, 'placeBed(2, 1, 2, "north", ":_bed");', true);
+    expect(bedEdgeWorld.getVoxel(2, 1, 2)?.name).toBe("minecraft:red_bed");
+
+    // 5. Adv-5 & Diag-1: Covered porch / patio + overhanging eaves do NOT suppress front-wall peeling
+    const adv5 = new VoxelWorld([28, 16, 28]);
+    for (let x = 10; x <= 18; x++) {
+      for (let z = 10; z <= 18; z++) {
+        adv5.setVoxel(x, 4, z, "minecraft:stone_bricks", undefined, false, 1);
+        adv5.setVoxel(x, 9, z, "minecraft:stone_bricks", undefined, false, 1);
+        if (x === 10 || x === 18 || z === 10 || z === 18) {
+          for (let y = 5; y <= 8; y++) {
+            adv5.setVoxel(x, y, z, "minecraft:oak_planks", undefined, false, 2);
+          }
+        }
+      }
+      for (let z = 7; z <= 9; z++) {
+        adv5.setVoxel(x, 4, z, "minecraft:stone_bricks", undefined, false, 1);
+        adv5.setVoxel(x, 9, z, "minecraft:stone_bricks", undefined, false, 1);
+      }
+    }
+    const diag1Cut = filterVoxelsForCutaway(adv5.getAllVoxels(), 7, "NE");
+    expect(hasVoxel(diag1Cut, 14, 6, 10)).toBe(false);
+    expect(hasVoxel(diag1Cut, 18, 6, 14)).toBe(false);
+    expect(hasVoxel(diag1Cut, 14, 6, 18)).toBe(true);
+
+    for (let y = 5; y <= 8; y++) {
+      adv5.setVoxel(10, y, 7, "minecraft:oak_log", undefined, false, 3);
+      adv5.setVoxel(18, y, 7, "minecraft:oak_log", undefined, false, 3);
+    }
+    adv5.setVoxel(14, 5, 14, "minecraft:chest", undefined, false, 4);
+    const cutAdv5 = filterVoxelsForCutaway(adv5.getAllVoxels(), 7, "NE");
+    expect(hasVoxel(cutAdv5, 14, 6, 10)).toBe(false);
+    expect(hasVoxel(cutAdv5, 18, 6, 14)).toBe(false);
+    expect(hasVoxel(cutAdv5, 10, 6, 14)).toBe(true);
+    expect(hasVoxel(cutAdv5, 14, 6, 18)).toBe(true);
+    expect(hasVoxel(cutAdv5, 14, 5, 14)).toBe(true);
+
+    // 6. Adv-1: Terrain-floor 2-story structure peels 1F camera-facing walls alongside 2F
+    const adv1 = new VoxelWorld([20, 16, 20]);
+    for (let x = 0; x < 20; x++) {
+      for (let z = 0; z < 20; z++) {
+        adv1.setVoxel(x, 0, z, "minecraft:grass_block", undefined, true, 0);
+      }
+    }
+    for (let x = 5; x <= 13; x++) {
+      for (let z = 5; z <= 13; z++) {
+        adv1.setVoxel(x, 5, z, "minecraft:stone_bricks", undefined, false, 1);
+        adv1.setVoxel(x, 10, z, "minecraft:stone_bricks", undefined, false, 1);
+        if (x === 5 || x === 13 || z === 5 || z === 13) {
+          for (let y = 1; y <= 4; y++) adv1.setVoxel(x, y, z, "minecraft:oak_planks", undefined, false, 2);
+          for (let y = 6; y <= 9; y++) adv1.setVoxel(x, y, z, "minecraft:oak_planks", undefined, false, 2);
+        }
+      }
+    }
+    const cutAdv1 = filterVoxelsForCutaway(adv1.getAllVoxels(), 8, "NE");
+    expect(hasVoxel(cutAdv1, 13, 2, 9)).toBe(false);
+    expect(hasVoxel(cutAdv1, 9, 2, 5)).toBe(false);
+    expect(hasVoxel(cutAdv1, 5, 2, 9)).toBe(true);
+    expect(hasVoxel(cutAdv1, 13, 7, 9)).toBe(false);
+    expect(hasVoxel(cutAdv1, 9, 7, 5)).toBe(false);
+    expect(hasVoxel(cutAdv1, 13, 5, 9)).toBe(true);
+
+    // 7. Adv-2 & Adv-2b: Furniture-dense 1st floor keeps floorY=4 and peels bottom wall course y=5
+    const adv2 = new VoxelWorld([20, 16, 20]);
+    for (let x = 8; x <= 12; x++) {
+      for (let z = 8; z <= 12; z++) {
+        adv2.setVoxel(x, 4, z, "minecraft:stone_bricks", undefined, false, 1);
+        adv2.setVoxel(x, 9, z, "minecraft:stone_bricks", undefined, false, 1);
+        if (x === 8 || x === 12 || z === 8 || z === 12) {
+          for (let y = 5; y <= 8; y++) {
+            adv2.setVoxel(x, y, z, "minecraft:oak_planks", undefined, false, 2);
+          }
+        }
+      }
+    }
+    for (let x = 9; x <= 11; x++) {
+      for (let z = 9; z <= 10; z++) {
+        adv2.setVoxel(x, 5, z, "minecraft:chest", undefined, false, 3);
+      }
+    }
+    adv2.setVoxel(9, 5, 11, "minecraft:chest", undefined, false, 3);
+    const cutAdv2 = filterVoxelsForCutaway(adv2.getAllVoxels(), 7, "NE");
+    expect(hasVoxel(cutAdv2, 12, 5, 10)).toBe(false);
+    expect(hasVoxel(cutAdv2, 10, 5, 8)).toBe(false);
+    expect(hasVoxel(cutAdv2, 8, 5, 10)).toBe(true);
+    expect(hasVoxel(cutAdv2, 9, 5, 9)).toBe(true);
+
+    const adv2b = new VoxelWorld([20, 20, 20]);
+    for (let x = 6; x <= 12; x++) {
+      for (let z = 6; z <= 12; z++) {
+        adv2b.setVoxel(x, 4, z, "minecraft:stone_bricks", undefined, false, 1);
+        adv2b.setVoxel(x, 9, z, "minecraft:stone_bricks", undefined, false, 1);
+        adv2b.setVoxel(x, 14, z, "minecraft:stone_bricks", undefined, false, 1);
+        if (x === 6 || x === 12 || z === 6 || z === 12) {
+          for (let y = 5; y <= 8; y++) adv2b.setVoxel(x, y, z, "minecraft:oak_planks", undefined, false, 2);
+          for (let y = 10; y <= 13; y++) adv2b.setVoxel(x, y, z, "minecraft:oak_planks", undefined, false, 2);
+        }
+      }
+    }
+    let placedStairs = 0;
+    for (let x = 7; x <= 11 && placedStairs < 22; x++) {
+      for (let z = 7; z <= 11 && placedStairs < 22; z++) {
+        adv2b.setVoxel(x, 5, z, "minecraft:oak_stairs", { facing: "north" }, false, 3);
+        placedStairs++;
+      }
+    }
+    const cutAdv2b = filterVoxelsForCutaway(adv2b.getAllVoxels(), 12, "NE");
+    expect(hasVoxel(cutAdv2b, 12, 5, 9)).toBe(false);
+    expect(hasVoxel(cutAdv2b, 9, 5, 6)).toBe(false);
+    expect(hasVoxel(cutAdv2b, 6, 5, 9)).toBe(true);
+    expect(hasVoxel(cutAdv2b, 12, 10, 9)).toBe(false);
+  });
 });

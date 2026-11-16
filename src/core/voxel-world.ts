@@ -647,7 +647,14 @@ export class VoxelWorld {
 
     if (!hasLintelAt(x, y, z)) return false;
 
-    // A true wall pillar at (wx, y, wz) must be solid at y AND solid at y+1 (or y-1 if y is top of doorway)
+    const isOpenAt = (ox: number, oy: number, oz: number): boolean => {
+      const v = this.voxels.get(VoxelWorld.coordKey(ox, oy, oz));
+      return !v || isInteriorFixtureBlock(v.name);
+    };
+
+    // A true wall pillar at (wx, wy, wz) must be >= 2 blocks tall (solid at wy AND wy+1,
+    // or at wy-1 when (x, wy-1, z) is open such as the upper level of a doorway).
+    // Never treat a 1-block-tall floor object sitting on a horizontal floor slab as a wall pillar.
     const isWallPillarAt = (wx: number, wy: number, wz: number): boolean => {
       const v = this.voxels.get(VoxelWorld.coordKey(wx, wy, wz));
       if (!v || isInteriorFixtureBlock(v.name)) return false;
@@ -656,13 +663,23 @@ export class VoxelWorld {
         return false;
       }
       const vUp = this.voxels.get(VoxelWorld.coordKey(wx, wy + 1, wz));
-      if (vUp && !isInteriorFixtureBlock(vUp.name)) return true;
-      return Boolean(vDown && !vDown.isTerrain && !isInteriorFixtureBlock(vDown.name));
-    };
-
-    const isOpenAt = (ox: number, oy: number, oz: number): boolean => {
-      const v = this.voxels.get(VoxelWorld.coordKey(ox, oy, oz));
-      return !v || isInteriorFixtureBlock(v.name);
+      if (vUp && !isInteriorFixtureBlock(vUp.name)) {
+        if (v.name.endsWith("_fence") && vUp.name.endsWith("_slab")) {
+          let openSides = 0;
+          if (isOpenAt(wx + 1, wy, wz)) openSides++;
+          if (isOpenAt(wx - 1, wy, wz)) openSides++;
+          if (isOpenAt(wx, wy, wz + 1)) openSides++;
+          if (isOpenAt(wx, wy, wz - 1)) openSides++;
+          if (openSides >= 3) return false;
+        }
+        return true;
+      }
+      return Boolean(
+        vDown &&
+          !vDown.isTerrain &&
+          !isInteriorFixtureBlock(vDown.name) &&
+          isOpenAt(x, wy - 1, z)
+      );
     };
 
     // Checks if adjacent slice along Z has a lintel and flanking wall pillars on both sides of [lx..x-1] and [x+1..rx]
@@ -1700,18 +1717,39 @@ export class VoxelWorld {
             const blockedUpper = Boolean(
               upperVoxel && !isPassableNonBlockingBlock(upperVoxel.name)
             );
-            roomDoors.push({
-              x: ax,
-              y: floorY,
-              z: az,
-              block: "minecraft:air (doorway_opening)",
-              blocked: blockedUpper,
-              ...(blockedUpper && upperVoxel
-                ? {
-                    reason: `Doorway opening at (${ax}, ${floorY + 1}, ${az}) is blocked by ${upperVoxel.name}`,
-                  }
-                : {}),
-            });
+            if (blockedUpper && upperVoxel) {
+              const trace =
+                upperVoxel.opId > 0
+                  ? this.traces.get(upperVoxel.opId)
+                  : undefined;
+              const traceDesc = trace
+                ? ` (Line ${trace.line}: \`${trace.codeSnippet}\`)`
+                : "";
+              const reason = `Doorway opening at (${ax}, ${floorY + 1}, ${az}) is blocked by ${upperVoxel.name}${traceDesc}`;
+              roomDoors.push({
+                x: ax,
+                y: floorY,
+                z: az,
+                block: "minecraft:air (doorway_opening)",
+                blocked: true,
+                reason,
+              });
+              flowIssues.push({
+                type: "door_blocked",
+                roomId,
+                coord: { x: ax, y: floorY + 1, z: az },
+                message: reason,
+                ...(trace ? { trace } : {}),
+              });
+            } else {
+              roomDoors.push({
+                x: ax,
+                y: floorY,
+                z: az,
+                block: "minecraft:air (doorway_opening)",
+                blocked: false,
+              });
+            }
           }
         }
       }

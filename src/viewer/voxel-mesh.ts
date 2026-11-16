@@ -1277,15 +1277,17 @@ export function filterVoxelsForCutaway(
 ): VoxelData[] {
   let minBY = Infinity;
   const nonTerrainCoords = new Set<string>();
+  const allOccupiedCoords = new Set<string>();
   const structuralByY = new Map<number, VoxelData[]>();
   const allStructuralCoords = new Set<string>();
 
   for (const v of voxels) {
+    const key = `${v.x},${v.y},${v.z}`;
+    allOccupiedCoords.add(key);
     if (!v.isTerrain) {
       if (v.y < minBY) {
         minBY = v.y;
       }
-      const key = `${v.x},${v.y},${v.z}`;
       nonTerrainCoords.add(key);
       if (!isCutawayExteriorProp(v.name)) {
         allStructuralCoords.add(key);
@@ -1336,32 +1338,54 @@ export function filterVoxelsForCutaway(
     }
   }
 
+  const preferBroaderLowerSlab = (
+    candidate: (typeof yFloorStats)[number],
+    minYAllowed = -Infinity
+  ) => {
+    const prev = yFloorStats.find(
+      (s) =>
+        s.y === candidate.y - 1 &&
+        s.y >= minYAllowed &&
+        s.coveredByAir >= 1 &&
+        s.total > candidate.total
+    );
+    return prev ?? candidate;
+  };
+
   const floorSlabYs: number[] = [];
   if (maxSupportingCovered >= 4) {
-    const primary = wallSupportingFloors.find((s) => s.coveredByAir >= 4);
-    if (primary) {
+    const rawPrimary = wallSupportingFloors.find((s) => s.coveredByAir >= 4);
+    if (rawPrimary) {
+      const primary = preferBroaderLowerSlab(rawPrimary);
       floorSlabYs.push(primary.y);
       for (const stat of wallSupportingFloors) {
+        if (stat.y < floorSlabYs[floorSlabYs.length - 1] + 3) continue;
         if (
-          stat.y >= floorSlabYs[floorSlabYs.length - 1] + 3 &&
-          (stat.coveredByAir >= 4 ||
-            (stat.total <= 25 && stat.coveredByAir >= 2))
+          stat.coveredByAir >= 4 ||
+          (stat.total <= 25 && stat.coveredByAir >= 2)
         ) {
-          floorSlabYs.push(stat.y);
+          const chosen = preferBroaderLowerSlab(
+            stat,
+            floorSlabYs[floorSlabYs.length - 1] + 3
+          );
+          floorSlabYs.push(chosen.y);
         }
       }
     }
   } else if (maxSupportingCovered >= 1) {
     // Handles small furnished rooms (e.g., 4x4 tower on sloped terrain where coveredByAir is 1..3)
-    const primary = wallSupportingFloors.find((s) => s.coveredByAir >= 1);
-    if (primary) {
+    const rawPrimary = wallSupportingFloors.find((s) => s.coveredByAir >= 1);
+    if (rawPrimary) {
+      const primary = preferBroaderLowerSlab(rawPrimary);
       floorSlabYs.push(primary.y);
       for (const stat of wallSupportingFloors) {
-        if (
-          stat.y >= floorSlabYs[floorSlabYs.length - 1] + 3 &&
-          stat.coveredByAir >= 2
-        ) {
-          floorSlabYs.push(stat.y);
+        if (stat.y < floorSlabYs[floorSlabYs.length - 1] + 3) continue;
+        if (stat.coveredByAir >= 2) {
+          const chosen = preferBroaderLowerSlab(
+            stat,
+            floorSlabYs[floorSlabYs.length - 1] + 3
+          );
+          floorSlabYs.push(chosen.y);
         }
       }
     }
@@ -1377,7 +1401,7 @@ export function filterVoxelsForCutaway(
   }
 
   const floorSlabSet = new Set(floorSlabYs);
-  const lowestFloorY = floorSlabYs.length > 0 ? floorSlabYs[0] : -Infinity;
+  let lowestFloorY = floorSlabYs.length > 0 ? floorSlabYs[0] : -Infinity;
 
   interface StoryRange {
     floorY: number;
@@ -1388,6 +1412,29 @@ export function filterVoxelsForCutaway(
 
   const stories: StoryRange[] = [];
   if (floorSlabYs.length > 0) {
+    // If a terrain-floor 1st story exists beneath the lowest built floor slab (hollow air below
+    // floorSlabYs[0], rather than a solid foundation), prepend the terrain-floor 1st story so
+    // 1F camera-facing walls peel alongside upper stories.
+    if (Number.isFinite(minBY) && floorSlabYs[0] - minBY >= 3) {
+      const firstSlabList = structuralByY.get(floorSlabYs[0]) ?? [];
+      const hasHollowRoomBelow = firstSlabList.some(
+        (v) =>
+          !allOccupiedCoords.has(`${v.x},${floorSlabYs[0] - 1},${v.z}`) &&
+          !allOccupiedCoords.has(`${v.x},${floorSlabYs[0] - 2},${v.z}`)
+      );
+      if (hasHollowRoomBelow) {
+        const max1FY = Math.min(cutY, floorSlabYs[0] - 1);
+        if (minBY <= max1FY) {
+          stories.push({
+            floorY: minBY - 1,
+            minY: minBY,
+            maxY: max1FY,
+            topY: floorSlabYs[0] - 1,
+          });
+          lowestFloorY = minBY;
+        }
+      }
+    }
     for (let i = 0; i < floorSlabYs.length; i++) {
       const floorY = floorSlabYs[i];
       const minY = floorY + 1;
@@ -1563,7 +1610,7 @@ export function filterVoxelsForCutaway(
         dx: number,
         dz: number
       ): boolean => {
-        const hasBuiltFloor = floorSlabYs.length > 0;
+        const hasBuiltFloor = floorSlabSet.has(story.floorY);
         if (
           hasBuiltFloor &&
           !nonTerrainCoords.has(`${x + dx},${story.floorY},${z + dz}`)
@@ -1577,9 +1624,21 @@ export function filterVoxelsForCutaway(
         for (let step = 2; step <= maxScan; step++) {
           const tx = x + dx * step;
           const tz = z + dz * step;
-          for (let y = story.minY + 1; y <= maxCheckY; y++) {
-            if (allStructuralCoords.has(`${tx},${y},${tz}`)) {
-              return true;
+          let hasFlankingWall = false;
+          for (let k = 1; k <= 2; k++) {
+            if (
+              wallColSet.has(`${tx - px * k},${tz - pz * k}`) ||
+              wallColSet.has(`${tx + px * k},${tz + pz * k}`)
+            ) {
+              hasFlankingWall = true;
+              break;
+            }
+          }
+          if (hasFlankingWall) {
+            for (let y = story.minY + 1; y <= maxCheckY; y++) {
+              if (allStructuralCoords.has(`${tx},${y},${tz}`)) {
+                return true;
+              }
             }
           }
           // Full-height open front gap without lintel: check for flanking front-wall jambs
