@@ -1973,4 +1973,108 @@ describe("MineBuildingMCP End-to-End Verification", () => {
     expect(hasVoxel(cutE5d, 17, 6, 10)).toBe(false);
     expect(hasVoxel(cutE5d, 18, 6, 14)).toBe(false);
   });
+
+  it("11. Free camera movement, zoom, and custom view pixel picking via render_camera + inspect_pixel(custom)", async () => {
+    const { MineBuildingMcpServer } = await import("../src/mcp/server.js");
+    const mcpServer = new MineBuildingMcpServer({
+      wsPort: 0,
+      vitePort: 0,
+      openViewer: false,
+    });
+    await mcpServer.wsBridge.start();
+
+    try {
+      await mcpServer.handleLoadTerrain({ nbtPath: sampleNbtPath });
+
+      const jsCode = [
+        "// Line 1: Free camera test structure",
+        'placeFoundation(14, 14, 18, 18, 15, "stone_bricks");',
+        'fillBox(15, 16, 15, 17, 18, 17, "gold_block", false);',
+        'setBlock(16, 19, 16, "end_rod");',
+      ].join("\n");
+
+      const buildRes = await mcpServer.handleRunBuildScript({
+        jsCode,
+        resolution: 256,
+        resetBeforeRun: true,
+      });
+      expect(buildRes.isError).toBeFalsy();
+
+      // 1. Zoom in directly onto the gold_block + end_rod marker at (16.5, 17.5, 16.5)
+      const camRes1 = await mcpServer.handleRenderCamera({
+        target: { x: 16.5, y: 17.5, z: 16.5 },
+        yaw: 135,
+        pitch: 15,
+        distance: 10,
+        zoom: 4,
+        resolution: 256,
+      });
+      expect(camRes1.isError).toBeFalsy();
+      expect(camRes1.content.length).toBe(2);
+      const camImg1 = camRes1.content[1] as { type: "image"; data: string; mimeType: string };
+      expect(camImg1.type).toBe("image");
+      const png1 = PNG.sync.read(Buffer.from(camImg1.data, "base64"));
+      expect(png1.width).toBe(256);
+      expect(png1.height).toBe(256);
+
+      const camText1 = (camRes1.content[0] as { type: "text"; text: string }).text;
+      const jsonMatch1 = camText1.match(/Camera State JSON:\n([\s\S]+)$/);
+      expect(jsonMatch1).not.toBeNull();
+      const state1 = JSON.parse(jsonMatch1![1]);
+      expect(state1.projection).toBe("perspective");
+      expect(state1.zoom).toBeCloseTo(4, 2);
+      expect(state1.yaw).toBeCloseTo(135, 1);
+      expect(state1.pitch).toBeCloseTo(15, 1);
+      expect(state1.target).toEqual({ x: 16.5, y: 17.5, z: 16.5 });
+
+      // 2. Inspect center pixel of "custom" view -> must hit our gold_block (Line 3)
+      const customInspect = await mcpServer.handleInspectPixel({
+        view: "custom",
+        u: 0.5,
+        v: 0.5,
+      });
+      const customParsed = JSON.parse(
+        (customInspect.content[0] as { type: "text"; text: string }).text
+      );
+      expect(customParsed.hit).toBe(true);
+      expect(customParsed.block).toBe("minecraft:gold_block");
+      expect(customParsed.trace.line).toBe(3);
+
+      // 3. Relative orbit, zoomFactor, and pan adjustment
+      const camRes2 = await mcpServer.handleRenderCamera({
+        zoomFactor: 1.5,
+        deltaYaw: 45,
+        deltaPitch: -10,
+        pan: { y: 1 },
+        resolution: 320,
+      });
+      expect(camRes2.isError).toBeFalsy();
+      const camText2 = (camRes2.content[0] as { type: "text"; text: string }).text;
+      const jsonMatch2 = camText2.match(/Camera State JSON:\n([\s\S]+)$/);
+      expect(jsonMatch2).not.toBeNull();
+      const state2 = JSON.parse(jsonMatch2![1]);
+      expect(state2.zoom).toBeCloseTo(6, 2);
+      expect(state2.yaw).toBeCloseTo(180, 1);
+      expect(state2.pitch).toBeCloseTo(5, 1);
+      expect(state2.target).toEqual({ x: 16.5, y: 18.5, z: 16.5 });
+      expect(state2.resolution).toBe(320);
+
+      // 4. Verify "NE" cached picker buffer from run_build_script still works independently
+      let neHitBuild = false;
+      for (let v = 40; v < 210 && !neHitBuild; v += 8) {
+        for (let u = 60; u < 200 && !neHitBuild; u += 8) {
+          const neRes = await mcpServer.handleInspectPixel({ view: "NE", u, v });
+          const neParsed = JSON.parse(
+            (neRes.content[0] as { type: "text"; text: string }).text
+          );
+          if (neParsed.hit && !neParsed.isTerrain && neParsed.trace) {
+            neHitBuild = true;
+          }
+        }
+      }
+      expect(neHitBuild).toBe(true);
+    } finally {
+      await mcpServer.close();
+    }
+  }, 45000);
 });
