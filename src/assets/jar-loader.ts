@@ -614,9 +614,16 @@ export function generateProceduralBlockPngDataUrl(blockName: string): string {
   return `data:image/png;base64,${buffer.toString("base64")}`;
 }
 
+type RawTextureRef =
+  | string
+  | {
+      sprite?: unknown;
+      force_translucent?: unknown;
+    };
+
 interface RawFaceJson {
   uv?: [number, number, number, number];
-  texture: string;
+  texture: RawTextureRef;
   cullface?: string;
   rotation?: number;
   tintindex?: number;
@@ -640,7 +647,7 @@ interface RawElementJson {
 
 interface RawBlockModelJson {
   parent?: string;
-  textures?: Record<string, string>;
+  textures?: Record<string, RawTextureRef>;
   elements?: RawElementJson[];
 }
 
@@ -835,7 +842,7 @@ export class JarAssetLoader {
       const raw = this.loadRawModelJson(cleanRef);
       if (!raw) break;
       chain.push(raw);
-      currentRef = raw.parent;
+      currentRef = typeof raw.parent === "string" ? raw.parent : undefined;
     }
 
     if (chain.length === 0) {
@@ -860,21 +867,36 @@ export class JarAssetLoader {
     }
 
     // Child textures override parent textures
-    const mergedTextures: Record<string, string> = {};
+    const mergedTextures: Record<string, unknown> = {};
     for (let i = chain.length - 1; i >= 0; i--) {
       const texMap = chain[i].textures;
-      if (texMap) {
+      if (texMap && typeof texMap === "object") {
         Object.assign(mergedTextures, texMap);
       }
     }
 
-    const resolveConcreteTexture = (val: string | undefined): string | null => {
-      let cur = val;
-      for (let i = 0; i < 16 && cur; i++) {
-        if (cur.startsWith("#")) {
-          cur = mergedTextures[cur.slice(1)];
+    const resolveConcreteTexture = (val: unknown): string | null => {
+      let cur: unknown = val;
+      for (let i = 0; i < 16 && cur != null; i++) {
+        if (typeof cur === "object") {
+          const sprite = (cur as { sprite?: unknown }).sprite;
+          if (typeof sprite === "string") {
+            cur = sprite;
+          } else {
+            return null;
+          }
+        }
+        if (typeof cur !== "string") {
+          return null;
+        }
+        const trimmed = cur.trim();
+        if (!trimmed) {
+          return null;
+        }
+        if (trimmed.startsWith("#")) {
+          cur = mergedTextures[trimmed.slice(1)];
         } else {
-          return normalizeTextureRefName(cur);
+          return normalizeTextureRefName(trimmed);
         }
       }
       return null;
@@ -925,6 +947,15 @@ export class JarAssetLoader {
     let primaryTextureKey: string | null = null;
 
     for (const el of rawElements) {
+      if (
+        !el ||
+        !Array.isArray(el.from) ||
+        el.from.length !== 3 ||
+        !Array.isArray(el.to) ||
+        el.to.length !== 3
+      ) {
+        continue;
+      }
       const faces: Partial<Record<McFaceDirection, ResolvedModelFace>> = {};
       for (const [rawDir, rawFace] of Object.entries(el.faces ?? {})) {
         const dir = this.normalizeFaceDirection(rawDir);
@@ -1199,7 +1230,7 @@ export class JarAssetLoader {
       variants = {};
       for (const [stateKey, rawVal] of Object.entries(rawState.variants)) {
         const chosen = Array.isArray(rawVal) ? rawVal[0] : rawVal;
-        if (!chosen || !chosen.model) continue;
+        if (!chosen || typeof chosen.model !== "string") continue;
         const ref = this.normalizeAppliedRef(chosen);
         referencedModels.add(ref.model);
         variants[stateKey] = [ref];
@@ -1210,7 +1241,7 @@ export class JarAssetLoader {
       multipart = [];
       for (const mc of rawState.multipart) {
         const chosen = Array.isArray(mc.apply) ? mc.apply[0] : mc.apply;
-        if (!chosen || !chosen.model) continue;
+        if (!chosen || typeof chosen.model !== "string") continue;
         const ref = this.normalizeAppliedRef(chosen);
         referencedModels.add(ref.model);
         multipart.push({

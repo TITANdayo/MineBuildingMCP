@@ -27,14 +27,191 @@ import { executeBuildScript } from "../core/builder-dsl.js";
 import { loadStructureNbt, saveStructureNbt } from "../core/nbt-io.js";
 import { VoxelWorld } from "../core/voxel-world.js";
 import type {
+  CameraControlParams,
+  CameraPreset,
+  CameraProjection,
   InspectResult,
+  InspectViewId,
   StructureEvaluation,
   TraceRecord,
+  Vec3,
   ViewDirection,
 } from "../types/shared.js";
 import { WsBridge, type WsBridgeOptions } from "./ws-bridge.js";
 
 const VIEW_DIRECTIONS: ViewDirection[] = ["NE", "SE", "SW", "NW"];
+const INSPECT_VIEWS: InspectViewId[] = ["NE", "SE", "SW", "NW", "custom"];
+const CAMERA_PRESETS: CameraPreset[] = [
+  "NE",
+  "SE",
+  "SW",
+  "NW",
+  "N",
+  "S",
+  "E",
+  "W",
+  "TOP",
+  "FRONT",
+  "BACK",
+  "LEFT",
+  "RIGHT",
+  "RESET",
+];
+const CAMERA_PROJECTIONS: CameraProjection[] = ["perspective", "orthographic"];
+
+function parseOptionalFiniteNumber(
+  val: unknown,
+  fieldName: string
+): number | undefined {
+  if (val === undefined || val === null) return undefined;
+  const num = Number(val);
+  if (!Number.isFinite(num)) {
+    throw new Error(`Argument "${fieldName}" must be a finite number.`);
+  }
+  return num;
+}
+
+function parseOptionalVec3(val: unknown, fieldName: string): Vec3 | undefined {
+  if (val === undefined || val === null) return undefined;
+  if (typeof val !== "object" || Array.isArray(val)) {
+    throw new Error(`Argument "${fieldName}" must be an object { x, y, z }.`);
+  }
+  const obj = val as Record<string, unknown>;
+  const x = parseOptionalFiniteNumber(obj.x, `${fieldName}.x`);
+  const y = parseOptionalFiniteNumber(obj.y, `${fieldName}.y`);
+  const z = parseOptionalFiniteNumber(obj.z, `${fieldName}.z`);
+  if (x === undefined || y === undefined || z === undefined) {
+    throw new Error(
+      `Argument "${fieldName}" must include finite numeric x, y, and z.`
+    );
+  }
+  return { x, y, z };
+}
+
+function parseOptionalPartialVec3(
+  val: unknown,
+  fieldName: string
+): Partial<Vec3> | undefined {
+  if (val === undefined || val === null) return undefined;
+  if (typeof val !== "object" || Array.isArray(val)) {
+    throw new Error(
+      `Argument "${fieldName}" must be an object with optional x, y, z.`
+    );
+  }
+  const obj = val as Record<string, unknown>;
+  const out: Partial<Vec3> = {};
+  const x = parseOptionalFiniteNumber(obj.x, `${fieldName}.x`);
+  const y = parseOptionalFiniteNumber(obj.y, `${fieldName}.y`);
+  const z = parseOptionalFiniteNumber(obj.z, `${fieldName}.z`);
+  if (x !== undefined) out.x = x;
+  if (y !== undefined) out.y = y;
+  if (z !== undefined) out.z = z;
+  return out;
+}
+
+function parseCameraControlParams(
+  raw: Record<string, unknown>
+): CameraControlParams {
+  const params: CameraControlParams = {};
+
+  if (raw.preset !== undefined && raw.preset !== null) {
+    const preset = String(raw.preset).toUpperCase() as CameraPreset;
+    if (!CAMERA_PRESETS.includes(preset)) {
+      throw new Error(
+        `Invalid preset "${String(raw.preset)}". Expected one of: ${CAMERA_PRESETS.join(", ")}.`
+      );
+    }
+    params.preset = preset;
+  }
+
+  if (raw.projection !== undefined && raw.projection !== null) {
+    const projection = String(raw.projection).toLowerCase() as CameraProjection;
+    if (!CAMERA_PROJECTIONS.includes(projection)) {
+      throw new Error(
+        `Invalid projection "${String(raw.projection)}". Expected "perspective" or "orthographic".`
+      );
+    }
+    params.projection = projection;
+  }
+
+  const target = parseOptionalVec3(raw.target, "target");
+  if (target) params.target = target;
+
+  const position = parseOptionalVec3(raw.position, "position");
+  if (position) params.position = position;
+
+  const pan = parseOptionalPartialVec3(raw.pan, "pan");
+  if (pan) params.pan = pan;
+
+  const yaw = parseOptionalFiniteNumber(raw.yaw, "yaw");
+  if (yaw !== undefined) params.yaw = yaw;
+
+  const pitch = parseOptionalFiniteNumber(raw.pitch, "pitch");
+  if (pitch !== undefined) params.pitch = pitch;
+
+  const distance = parseOptionalFiniteNumber(raw.distance, "distance");
+  if (distance !== undefined) {
+    if (distance <= 0) {
+      throw new Error('Argument "distance" must be greater than 0.');
+    }
+    params.distance = distance;
+  }
+
+  const zoom = parseOptionalFiniteNumber(raw.zoom, "zoom");
+  if (zoom !== undefined) {
+    if (zoom <= 0) {
+      throw new Error('Argument "zoom" must be greater than 0.');
+    }
+    params.zoom = zoom;
+  }
+
+  const fov = parseOptionalFiniteNumber(raw.fov, "fov");
+  if (fov !== undefined) {
+    if (fov <= 0) {
+      throw new Error('Argument "fov" must be greater than 0.');
+    }
+    params.fov = fov;
+  }
+
+  const orthoSize = parseOptionalFiniteNumber(raw.orthoSize, "orthoSize");
+  if (orthoSize !== undefined) {
+    if (orthoSize <= 0) {
+      throw new Error('Argument "orthoSize" must be greater than 0.');
+    }
+    params.orthoSize = orthoSize;
+  }
+
+  const zoomFactor = parseOptionalFiniteNumber(raw.zoomFactor, "zoomFactor");
+  if (zoomFactor !== undefined) {
+    if (zoomFactor <= 0) {
+      throw new Error('Argument "zoomFactor" must be greater than 0.');
+    }
+    params.zoomFactor = zoomFactor;
+  }
+
+  const deltaYaw = parseOptionalFiniteNumber(raw.deltaYaw, "deltaYaw");
+  if (deltaYaw !== undefined) params.deltaYaw = deltaYaw;
+
+  const deltaPitch = parseOptionalFiniteNumber(raw.deltaPitch, "deltaPitch");
+  if (deltaPitch !== undefined) params.deltaPitch = deltaPitch;
+
+  const deltaDistance = parseOptionalFiniteNumber(
+    raw.deltaDistance,
+    "deltaDistance"
+  );
+  if (deltaDistance !== undefined) params.deltaDistance = deltaDistance;
+
+  const resolution = parseOptionalFiniteNumber(raw.resolution, "resolution");
+  if (resolution !== undefined) {
+    params.resolution = Math.max(64, Math.min(2048, Math.floor(resolution)));
+  }
+
+  if (raw.syncViewer !== undefined && raw.syncViewer !== null) {
+    params.syncViewer = Boolean(raw.syncViewer);
+  }
+
+  return params;
+}
 
 /**
  * Creates a default 32x32x32 world with a flat grass/dirt/stone base (Y=0..3)
@@ -180,6 +357,15 @@ export class MineBuildingMcpServer {
     });
   }
 
+  private async maybeAutoOpenViewer(): Promise<void> {
+    if (!this.wsBridge.shouldAutoOpenViewer()) return;
+    await this.wsBridge.openViewerInBrowser().catch((err) => {
+      process.stderr.write(
+        `[MineBuildingMCP] Failed to auto-open viewer browser: ${String(err)}\n`
+      );
+    });
+  }
+
   public async handleLoadTerrain(args: { nbtPath: string }): Promise<CallToolResult> {
     if (!args?.nbtPath || typeof args.nbtPath !== "string") {
       throw new Error("Missing or invalid required argument: nbtPath (string)");
@@ -190,6 +376,7 @@ export class MineBuildingMcpServer {
     const summary = this.world.getTerrainSummary();
 
     await this.syncCurrentWorldToViewer();
+    await this.maybeAutoOpenViewer();
 
     const payload = {
       status: "ok",
@@ -231,6 +418,7 @@ export class MineBuildingMcpServer {
 
     const execResult = executeBuildScript(this.world, args.jsCode, resetBeforeRun);
     await this.syncCurrentWorldToViewer();
+    await this.maybeAutoOpenViewer();
     const images = await this.wsBridge.renderViews(resolution);
 
     const reportText = formatBuildReport(
@@ -267,14 +455,103 @@ export class MineBuildingMcpServer {
     return { content };
   }
 
+  public async handleRenderCamera(
+    args: CameraControlParams = {}
+  ): Promise<CallToolResult> {
+    const params = parseCameraControlParams(
+      (args ?? {}) as Record<string, unknown>
+    );
+
+    if (!this.wsBridge.hasSyncedWorld()) {
+      await this.syncCurrentWorldToViewer();
+    }
+
+    const { image, camera } = await this.wsBridge.renderCamera(params);
+    await this.maybeAutoOpenViewer();
+
+    const summaryLines = [
+      `=== MineBuildingMCP Custom Camera Render ===`,
+      `Projection: ${camera.projection} | Resolution: ${camera.resolution}x${camera.resolution}px | Zoom: ${camera.zoom}x`,
+      `Target: (${camera.target.x.toFixed(2)}, ${camera.target.y.toFixed(2)}, ${camera.target.z.toFixed(2)}) | Position: (${camera.position.x.toFixed(2)}, ${camera.position.y.toFixed(2)}, ${camera.position.z.toFixed(2)})`,
+      `Orientation: yaw=${camera.yaw}°, pitch=${camera.pitch}°, distance=${camera.distance}`,
+      `Live 3D Viewer URL: ${this.wsBridge.getViteUrl()}`,
+      `Use inspect_pixel(view="custom", u, v) with u,v in [0.0, 1.0] (or integer pixels [0, ${camera.resolution - 1}]) to inspect any block in this custom view.`,
+      "",
+      `Camera State JSON:\n${JSON.stringify(camera, null, 2)}`,
+    ];
+
+    return {
+      content: [
+        {
+          type: "text",
+          text: summaryLines.join("\n"),
+        },
+        {
+          type: "image",
+          mimeType: "image/png",
+          data: stripDataUrlPrefix(image),
+        },
+      ],
+    };
+  }
+
+  public async handleOpenViewer(args?: {
+    force?: boolean;
+  }): Promise<CallToolResult> {
+    await this.wsBridge.start();
+
+    if (this.wsBridge.getConnectedClientCount() > 0) {
+      await this.syncCurrentWorldToViewer();
+    } else if (!this.wsBridge.hasSyncedWorld()) {
+      const voxels = this.world.getAllVoxels();
+      const traces = this.world.getTracesObject();
+      const { textures, blockModels } = this.collectWorldAssets();
+      this.wsBridge.prepareWorldPayload({
+        voxels,
+        size: [...this.world.size],
+        traces,
+        textures,
+        blockModels,
+      });
+    }
+
+    const result = await this.wsBridge.openViewerInBrowser({
+      force: Boolean(args?.force),
+    });
+
+    const payload = {
+      status: "ok",
+      opened: result.opened,
+      reason: result.reason,
+      viewerUrl: result.url,
+      visibleClients: result.visibleClients,
+    };
+
+    const msg =
+      result.reason === "opened"
+        ? `Opened 3D viewer in default browser: ${result.url}`
+        : result.reason === "already_connected"
+          ? `A visible 3D viewer browser is already connected (${result.visibleClients} client(s)): ${result.url}`
+          : `3D viewer was already opened earlier in this session (${result.url}). Pass force=true to open another tab.`;
+
+    return {
+      content: [
+        {
+          type: "text",
+          text: `${msg}\n\n${JSON.stringify(payload, null, 2)}`,
+        },
+      ],
+    };
+  }
+
   public async handleInspectPixel(args: {
-    view: ViewDirection;
+    view: InspectViewId;
     u: number;
     v: number;
   }): Promise<CallToolResult> {
-    if (!args || !VIEW_DIRECTIONS.includes(args.view)) {
+    if (!args || !INSPECT_VIEWS.includes(args.view)) {
       throw new Error(
-        `Invalid view "${String(args?.view)}". Expected one of: NE, SE, SW, NW.`
+        `Invalid view "${String(args?.view)}". Expected one of: ${INSPECT_VIEWS.join(", ")}.`
       );
     }
     const u = Number(args.u);
@@ -413,16 +690,126 @@ export class MineBuildingMcpServer {
             },
           },
           {
+            name: "render_camera",
+            description:
+              "Move, orbit, pan, or zoom the 3D camera freely (perspective or orthographic) and render a close-up or custom-angle PNG image. Also caches the \"custom\" offscreen ID picker buffer so inspect_pixel(view=\"custom\", u, v) works on the custom view, and optionally syncs the live browser viewer.",
+            inputSchema: {
+              type: "object",
+              properties: {
+                preset: {
+                  type: "string",
+                  enum: CAMERA_PRESETS,
+                  description:
+                    "Optional preset direction (NE, SE, SW, NW, N, S, E, W, TOP, FRONT, BACK, LEFT, RIGHT) or RESET to restore default framing.",
+                },
+                projection: {
+                  type: "string",
+                  enum: CAMERA_PROJECTIONS,
+                  description:
+                    "Camera projection mode: \"perspective\" (default, natural 3D depth) or \"orthographic\".",
+                },
+                target: {
+                  type: "object",
+                  description: "3D look-at target coordinate { x, y, z } in block units.",
+                  properties: {
+                    x: { type: "number" },
+                    y: { type: "number" },
+                    z: { type: "number" },
+                  },
+                  required: ["x", "y", "z"],
+                },
+                position: {
+                  type: "object",
+                  description:
+                    "Explicit 3D camera position { x, y, z } in block units (overrides yaw/pitch/distance).",
+                  properties: {
+                    x: { type: "number" },
+                    y: { type: "number" },
+                    z: { type: "number" },
+                  },
+                  required: ["x", "y", "z"],
+                },
+                yaw: {
+                  type: "number",
+                  description:
+                    "Compass azimuth angle in degrees (0=N/-Z, 45=NE, 90=E/+X, 135=SE, 180=S/+Z, 225=SW, 270=W/-X, 315=NW).",
+                },
+                pitch: {
+                  type: "number",
+                  description:
+                    "Elevation angle in degrees [-89, 89] (0=eye-level horizontal, 45=elevated, 89=top-down, negative=looking up).",
+                },
+                distance: {
+                  type: "number",
+                  description: "Distance from camera to target in blocks (>0).",
+                },
+                zoom: {
+                  type: "number",
+                  description:
+                    "Zoom multiplier [0.1, 50] (>1 zooms in, <1 zooms out).",
+                },
+                fov: {
+                  type: "number",
+                  description:
+                    "Vertical field of view in degrees [10, 120] for perspective projection (default: 45).",
+                },
+                orthoSize: {
+                  type: "number",
+                  description:
+                    "Base orthographic frustum span in blocks before zoom.",
+                },
+                zoomFactor: {
+                  type: "number",
+                  description:
+                    "Relative zoom multiplier applied to current zoom (e.g., 2.0 zooms in 2x, 0.5 zooms out 2x).",
+                },
+                deltaYaw: {
+                  type: "number",
+                  description: "Relative yaw offset in degrees added to current yaw.",
+                },
+                deltaPitch: {
+                  type: "number",
+                  description: "Relative pitch offset in degrees added to current pitch.",
+                },
+                deltaDistance: {
+                  type: "number",
+                  description:
+                    "Relative distance offset in blocks added to current distance (negative moves closer).",
+                },
+                pan: {
+                  type: "object",
+                  description: "Relative { x?, y?, z? } offset added to current target.",
+                  properties: {
+                    x: { type: "number" },
+                    y: { type: "number" },
+                    z: { type: "number" },
+                  },
+                },
+                resolution: {
+                  type: "number",
+                  description:
+                    "Square PNG resolution in pixels [64, 2048] (default: 512).",
+                },
+                syncViewer: {
+                  type: "boolean",
+                  description:
+                    "Whether to synchronize the live interactive browser camera to match (default: true).",
+                },
+              },
+            },
+          },
+          {
             name: "inspect_pixel",
             description:
-              "Inspect a specific pixel (u, v as integer pixel coordinates [0, resolution-1] or normalized [0.0, 1.0]) on one of the 4 rendered views (NE, SE, SW, NW) using the O(1) offscreen RGBA hardware ID picker. Returns exact 3D voxel coordinates, block name/state, distanceToGround, and the TraceRecord (opId, line number, codeSnippet) that placed the block.",
+              "Inspect a specific pixel (u, v as integer pixel coordinates [0, resolution-1] or normalized [0.0, 1.0]) on one of the 4 rendered views (NE, SE, SW, NW) or the latest custom camera render (\"custom\") using the O(1) offscreen RGBA hardware ID picker. Returns exact 3D voxel coordinates, block name/state, distanceToGround, and the TraceRecord (opId, line number, codeSnippet) that placed the block.",
             inputSchema: {
               type: "object",
               properties: {
                 view: {
                   type: "string",
-                  enum: ["NE", "SE", "SW", "NW"],
-                  description: "Which of the 4 orthographic camera views to inspect.",
+                  enum: ["NE", "SE", "SW", "NW", "custom"],
+                  description:
+                    "Which camera view to inspect (NE, SE, SW, NW, or custom from the latest render_camera call).",
                 },
                 u: {
                   type: "number",
@@ -436,6 +823,21 @@ export class MineBuildingMcpServer {
                 },
               },
               required: ["view", "u", "v"],
+            },
+          },
+          {
+            name: "open_viewer",
+            description:
+              "Open the live interactive 3D Three.js viewer in the user's default browser (skips if a visible browser viewer is already connected unless force=true).",
+            inputSchema: {
+              type: "object",
+              properties: {
+                force: {
+                  type: "boolean",
+                  description:
+                    "Open a new browser tab even if a visible viewer is already connected or was opened earlier (default: false).",
+                },
+              },
             },
           },
           {
@@ -479,9 +881,20 @@ export class MineBuildingMcpServer {
                   : undefined,
             });
 
+          case "render_camera":
+            return await this.handleRenderCamera(
+              args as unknown as CameraControlParams
+            );
+
+          case "open_viewer":
+            return await this.handleOpenViewer({
+              force:
+                args.force !== undefined ? Boolean(args.force) : undefined,
+            });
+
           case "inspect_pixel":
             return await this.handleInspectPixel({
-              view: String(args.view ?? "") as ViewDirection,
+              view: String(args.view ?? "") as InspectViewId,
               u: Number(args.u),
               v: Number(args.v),
             });
@@ -524,6 +937,7 @@ export class MineBuildingMcpServer {
     const transport = new StdioServerTransport();
     await this.server.connect(transport);
     process.stderr.write("[MineBuildingMCP] MCP Server connected via stdio transport\n");
+    await this.maybeAutoOpenViewer();
   }
 
   public async close(): Promise<void> {

@@ -57,13 +57,20 @@ npm run generate-sample
       "command": "npx",
       "args": ["tsx", "/path/to/MineBuildingMCP/src/mcp/server.ts"],
       "env": {
-        "MINECRAFT_JAR_PATH": "/optional/path/to/minecraft/version.jar"
+        "MINECRAFT_JAR_PATH": "/optional/path/to/minecraft/version.jar",
+        "MINEBUILDING_OPEN_VIEWER": "true"
       }
     }
   }
 }
 ```
 MCPサーバー起動時、自動的にViteサーバー（デフォルト `http://127.0.0.1:5173`）とWebSocketサーバー（デフォルト `ws://127.0.0.1:3001`）が立ち上がり、ブラウザ未接続時にはPlaywright Chromium（Headless）がバックグラウンドで自動起動します。人間がブラウザで `http://localhost:5173` を開いた場合は、両方の画面がリアルタイムに同期され、AIが `inspect_pixel` した座標が赤い3Dマーカーでハイライト表示されます。
+
+#### 主な環境変数 / CLIフラグ
+- `MINEBUILDING_OPEN_VIEWER=true` または CLIフラグ `--open-viewer`: MCPサーバー起動時／ツール実行時に可視ブラウザ（OS標準ブラウザ）で3DビューアURLを自動で1回だけ開きます（すでに可視ブラウザが接続済みの場合は多重起動しません）。
+- `MINEBUILDING_HEADLESS=false`: Playwright Chromiumをヘッドレスではなく可視ウィンドウとして起動します。
+- `MINEBUILDING_VITE_PORT` / `MINEBUILDING_WS_PORT`: ViteサーバーおよびWebSocketサーバーのポート番号を指定します（デフォルト: `5173` / `3001`）。
+- `MINECRAFT_JAR_PATH`: ローカルのMinecraftクライアント `.jar` のパスを明示指定します（未指定時は標準インストール先から自動検出）。
 
 ---
 
@@ -74,7 +81,13 @@ MCPサーバー起動時、自動的にViteサーバー（デフォルト `http:
 2. **`run_build_script(jsCode: string, resolution?: number, resetBeforeRun?: boolean)`**
    - AIが記述した建築DSLスクリプトを実行し、浮きブロック等の静的構造チェック結果・行番号トレース表・4方向（`NE`, `SE`, `SW`, `NW`）のレンダリング画像（`ImageContent`）を返します。
    - 利用可能な主なDSL関数：`setBlock`, `fillBox`, `placeFoundation`, `buildWall`, `buildPitchedRoof`, `line`, `clearArea`, `getSurfaceY`, `getDistanceToGround`
-3. **`inspect_pixel(view: "NE"|"SE"|"SW"|"NW", u: number, v: number)`**
-   - 指定した視点画像のピクセル座標 `(u, v)` にあるブロックの3D座標 `(x, y, z)`、ブロック名・State、生成元スクリプトの行番号（`line`）と呼び出しコード（`codeSnippet`）、および直下の地面までの距離（`distanceToGround`）を即座に返します。
-4. **`export_structure(outputPath: string)`**
+3. **`render_camera(params)`**
+   - AIがカメラの位置・注視点・角度・ズームを自由に操作して任意の視点からクローズアップや俯瞰画像をレンダリングし、ライブビューアのカメラも同期できます。
+   - 主なパラメータ：`preset` (`NE|SE|SW|NW|N|S|E|W|TOP|FRONT|BACK|LEFT|RIGHT|RESET`), `projection` (`perspective|orthographic`), `target` (`{x,y,z}`), `position` (`{x,y,z}`), `yaw`, `pitch`, `distance`, `zoom`, `fov`, `orthoSize`, 相対調整（`zoomFactor`, `deltaYaw`, `deltaPitch`, `deltaDistance`, `pan`）, `resolution`, `syncViewer`
+   - レンダリング結果は `"custom"` 視点のIDピッカーバッファにも保存されるため、続けて `inspect_pixel(view="custom", u, v)` で詳細部のブロックやソース行を逆引きできます。
+4. **`inspect_pixel(view: "NE"|"SE"|"SW"|"NW"|"custom", u: number, v: number)`**
+   - 指定した視点画像（4方向または `render_camera` で描画した `"custom"` 視点）のピクセル座標 `(u, v)` にあるブロックの3D座標 `(x, y, z)`、ブロック名・State、生成元スクリプトの行番号（`line`）と呼び出しコード（`codeSnippet`）、および直下の地面までの距離（`distanceToGround`）を即座に返します。
+5. **`open_viewer(force?: boolean)`**
+   - ライブ3Dビューア（`http://127.0.0.1:<vitePort>?wsPort=<wsPort>`）をOSのデフォルトブラウザで開きます（すでに可視ブラウザ接続済みの場合は重複起動をスキップ、`force=true` で強制起動）。
+6. **`export_structure(outputPath: string)`**
    - 完成した建築物を含むワールドをJava版ストラクチャーブロック互換の `.nbt` 形式で保存します。

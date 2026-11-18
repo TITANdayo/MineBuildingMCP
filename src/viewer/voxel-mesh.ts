@@ -233,6 +233,46 @@ const CANONICAL_STATE_DEFAULTS: Record<string, string> = {
   drag: "true",
 };
 
+function getDefaultPropValue(
+  def: CompiledBlockDefinition,
+  prop: string
+): string | undefined {
+  if (prop === "facing") {
+    const name = normalizeBlockName(def.blockName);
+    if (
+      name === "end_rod" ||
+      name === "lightning_rod" ||
+      name.endsWith("_lightning_rod") ||
+      name === "amethyst_cluster" ||
+      name.endsWith("_amethyst_bud")
+    ) {
+      return "up";
+    }
+    if (name === "hopper") {
+      return "down";
+    }
+    if (name === "observer") {
+      return "south";
+    }
+    if (name === "barrel") {
+      return "north";
+    }
+    if (def.variants) {
+      const keys = Object.keys(def.variants);
+      const hasNorth = keys.some((k) => /(^|,)facing=north(,|$)/i.test(k));
+      if (!hasNorth) {
+        if (keys.some((k) => /(^|,)facing=up(,|$)/i.test(k))) {
+          return "up";
+        }
+        if (keys.some((k) => /(^|,)facing=down(,|$)/i.test(k))) {
+          return "down";
+        }
+      }
+    }
+  }
+  return CANONICAL_STATE_DEFAULTS[prop];
+}
+
 function getFallbackBlockDef(blockName: string): CompiledBlockDefinition {
   const shortName = normalizeBlockName(blockName);
   const faces = Object.fromEntries(
@@ -448,7 +488,7 @@ function evaluateMultipartCondition(
   return true;
 }
 
-function resolveActiveModelParts(
+export function resolveActiveModelParts(
   voxel: VoxelData,
   def: CompiledBlockDefinition,
   voxelMap: Map<string, VoxelData>,
@@ -590,7 +630,7 @@ function resolveActiveModelParts(
             valid = false;
             break;
           }
-        } else if (CANONICAL_STATE_DEFAULTS[prop] === val) {
+        } else if (getDefaultPropValue(def, prop) === val) {
           score += 1;
         }
       }

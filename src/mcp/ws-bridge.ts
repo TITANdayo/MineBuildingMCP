@@ -1,3 +1,4 @@
+import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import type { IncomingMessage } from "node:http";
 import path from "node:path";
@@ -6,8 +7,11 @@ import { chromium, type Browser, type Page } from "playwright";
 import { createServer, type Logger, type ViteDevServer } from "vite";
 import { WebSocket, WebSocketServer } from "ws";
 import type {
+  CameraControlParams,
+  CameraStateSnapshot,
   CompiledBlockDefinition,
   InspectResult,
+  InspectViewId,
   TraceRecord,
   ViewDirection,
   VoxelData,
@@ -15,6 +19,42 @@ import type {
   WsResponse,
 } from "../types/shared.js";
 import { defaultJarAssetLoader } from "../assets/jar-loader.js";
+
+function parseEnvBool(value: string | undefined): boolean | undefined {
+  if (value === undefined) return undefined;
+  const normalized = value.trim().toLowerCase();
+  if (["true", "1", "yes", "on"].includes(normalized)) return true;
+  if (["false", "0", "no", "off"].includes(normalized)) return false;
+  return undefined;
+}
+
+function openUrlInDefaultBrowser(url: string): void {
+  if (!/^https?:\/\//i.test(url)) {
+    throw new Error(`Refusing to open non-HTTP(S) URL: ${url}`);
+  }
+
+  const child =
+    process.platform === "win32"
+      ? spawn("cmd", ["/c", "start", "", url], {
+          detached: true,
+          stdio: "ignore",
+          windowsHide: true,
+        })
+      : process.platform === "darwin"
+        ? spawn("open", [url], {
+            detached: true,
+            stdio: "ignore",
+          })
+        : spawn("xdg-open", [url], {
+            detached: true,
+            stdio: "ignore",
+          });
+
+  child.on("error", (err) => {
+    process.stderr.write(`[WsBridge] Failed to launch default browser: ${String(err)}\n`);
+  });
+  child.unref();
+}
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -78,6 +118,8 @@ export interface WsBridgeOptions {
   vitePort?: number;
   wsPort?: number;
   headless?: boolean;
+  openViewer?: boolean;
+  openUrlFn?: (url: string) => void | Promise<void>;
   requestTimeoutMs?: number;
 }
 
@@ -91,12 +133,17 @@ export class WsBridge {
   private startingPromise: Promise<void> | null = null;
 
   private clients = new Set<WebSocket>();
+  private clientRoles = new Map<WebSocket, "headless" | "browser">();
   private pendingRequests = new Map<string, PendingRequest<any>>();
   private latestSyncPayload: Extract<WsRequest, { type: "SYNC_WORLD" }> | null = null;
+  private latestCameraRequest: Extract<WsRequest, { type: "RENDER_CAMERA" }> | null = null;
+  private viewerAutoOpened = false;
 
   private vitePort: number;
   private wsPort: number;
   private readonly headless: boolean;
+  private readonly openViewer: boolean;
+  private readonly openUrlFn?: (url: string) => void | Promise<void>;
   private readonly requestTimeoutMs: number;
 
   constructor(options: WsBridgeOptions = {}) {
@@ -110,6 +157,14 @@ export class WsBridge {
       options.headless ??
       (process.env.MINEBUILDING_HEADLESS !== "false" &&
         process.env.CRAFTSTUDIO_HEADLESS !== "false");
+
+    const hasOpenViewerFlag = process.argv.includes("--open-viewer");
+    const envOpenViewer = parseEnvBool(
+      process.env.MINEBUILDING_OPEN_VIEWER ?? process.env.CRAFTSTUDIO_OPEN_VIEWER
+    );
+    this.openViewer =
+      options.openViewer ?? (hasOpenViewerFlag || envOpenViewer === true);
+    this.openUrlFn = options.openUrlFn;
     this.requestTimeoutMs = options.requestTimeoutMs ?? 30_000;
   }
 
@@ -133,6 +188,93 @@ export class WsBridge {
       }
     }
     return count;
+  }
+
+  public getVisibleClientCount(): number {
+    let count = 0;
+    for (const client of this.clients) {
+      if (
+        client.readyState === WebSocket.OPEN &&
+        this.clientRoles.get(client) !== "headless"
+      ) {
+        count++;
+      }
+    }
+    return count;
+  }
+
+  public shouldAutoOpenViewer(): boolean {
+    return this.openViewer;
+  }
+
+  public hasSyncedWorld(): boolean {
+    return this.latestSyncPayload !== null;
+  }
+
+  public prepareWorldPayload(params: SyncWorldParams): void {
+    let textures = params.textures;
+    let blockModels = params.blockModels;
+    if (!blockModels) {
+      const uniqueNames = Array.from(new Set(params.voxels.map((v) => v.name)));
+      blockModels = defaultJarAssetLoader.getBlockModelsForBlocks(uniqueNames);
+      const modelTextures = defaultJarAssetLoader.getTexturesForBlocks(uniqueNames);
+      textures = textures ? { ...modelTextures, ...textures } : modelTextures;
+    }
+
+    this.latestSyncPayload = {
+      type: "SYNC_WORLD",
+      id: randomUUID(),
+      voxels: params.voxels,
+      size: params.size,
+      traces: params.traces,
+      textures,
+      blockModels,
+    };
+  }
+
+  public async openViewerInBrowser(opts?: { force?: boolean }): Promise<{
+    opened: boolean;
+    url: string;
+    visibleClients: number;
+    reason: "opened" | "already_connected" | "already_opened";
+  }> {
+    await this.start();
+    const url = this.getViteUrl();
+    const visibleClients = this.getVisibleClientCount();
+    const force = Boolean(opts?.force);
+
+    if (!force) {
+      if (visibleClients > 0) {
+        return {
+          opened: false,
+          url,
+          visibleClients,
+          reason: "already_connected",
+        };
+      }
+      if (this.viewerAutoOpened) {
+        return {
+          opened: false,
+          url,
+          visibleClients,
+          reason: "already_opened",
+        };
+      }
+    }
+
+    this.viewerAutoOpened = true;
+    if (this.openUrlFn) {
+      await this.openUrlFn(url);
+    } else {
+      openUrlInDefaultBrowser(url);
+    }
+
+    return {
+      opened: true,
+      url,
+      visibleClients,
+      reason: "opened",
+    };
   }
 
   /**
@@ -250,10 +392,21 @@ export class WsBridge {
     );
   }
 
-  private handleNewConnection(ws: WebSocket, _req: IncomingMessage): void {
+  private handleNewConnection(ws: WebSocket, req: IncomingMessage): void {
+    let role: "headless" | "browser" = "browser";
+    try {
+      const reqUrl = new URL(req.url ?? "/", "http://127.0.0.1");
+      if (reqUrl.searchParams.get("client") === "headless") {
+        role = "headless";
+      }
+    } catch {
+      // default to "browser"
+    }
+
     this.clients.add(ws);
+    this.clientRoles.set(ws, role);
     process.stderr.write(
-      `[WsBridge] Viewer client connected (active clients: ${this.getConnectedClientCount()})\n`
+      `[WsBridge] Viewer client (${role}) connected (active clients: ${this.getConnectedClientCount()}, visible: ${this.getVisibleClientCount()})\n`
     );
 
     ws.on("message", (raw) => {
@@ -268,6 +421,7 @@ export class WsBridge {
 
     ws.on("close", () => {
       this.clients.delete(ws);
+      this.clientRoles.delete(ws);
       process.stderr.write(
         `[WsBridge] Viewer client disconnected (active clients: ${this.getConnectedClientCount()})\n`
       );
@@ -276,12 +430,21 @@ export class WsBridge {
     ws.on("error", (err) => {
       process.stderr.write(`[WsBridge] WebSocket client error: ${String(err)}\n`);
       this.clients.delete(ws);
+      this.clientRoles.delete(ws);
     });
 
     // Immediately push cached world state to newly connected tab/browser
     if (this.latestSyncPayload && ws.readyState === WebSocket.OPEN) {
       try {
         ws.send(JSON.stringify(this.latestSyncPayload));
+        if (this.latestCameraRequest) {
+          ws.send(
+            JSON.stringify({
+              ...this.latestCameraRequest,
+              id: "init-camera-sync",
+            })
+          );
+        }
       } catch (err) {
         process.stderr.write(`[WsBridge] Error sending initial SYNC_WORLD: ${String(err)}\n`);
       }
@@ -421,8 +584,9 @@ export class WsBridge {
           process.stderr.write(`[ViewerPageError] ${String(err)}\n`);
         });
 
-        const targetUrl = this.getViteUrl();
-        process.stderr.write(`[WsBridge] Navigating headless Chromium to ${targetUrl}\n`);
+        const baseUrl = this.getViteUrl();
+        const targetUrl = this.headless ? `${baseUrl}&client=headless` : baseUrl;
+        process.stderr.write(`[WsBridge] Navigating Chromium to ${targetUrl}\n`);
         await page.goto(targetUrl, { waitUntil: "domcontentloaded", timeout: 20_000 });
         this.page = page;
       } catch (err) {
@@ -475,6 +639,16 @@ export class WsBridge {
 
     await this.ensureClientConnected();
 
+    const prevSize = this.latestSyncPayload?.size;
+    if (
+      prevSize &&
+      (prevSize[0] !== params.size[0] ||
+        prevSize[1] !== params.size[1] ||
+        prevSize[2] !== params.size[2])
+    ) {
+      this.latestCameraRequest = null;
+    }
+
     // Cache latest world state so any newly connecting browser receives it immediately
     this.latestSyncPayload = request;
 
@@ -506,10 +680,37 @@ export class WsBridge {
   }
 
   /**
-   * Queries the offscreen RGBA picking buffer at normalized coordinates `(u, v)` in `[0.0, 1.0]`.
+   * Moves/zooms the camera and renders a single view + populates the "custom" ID picker buffer.
+   */
+  public async renderCamera(
+    params: CameraControlParams = {}
+  ): Promise<{ image: string; camera: CameraStateSnapshot }> {
+    await this.ensureClientConnected();
+
+    const id = randomUUID();
+    const request: Extract<WsRequest, { type: "RENDER_CAMERA" }> = {
+      type: "RENDER_CAMERA",
+      id,
+      params,
+    };
+
+    const response = await this.sendRequestWithRetry<
+      Extract<WsResponse, { type: "RENDER_CAMERA_RESULT" }>
+    >(request, "RENDER_CAMERA_RESULT", true);
+
+    this.latestCameraRequest = request;
+
+    return {
+      image: response.image,
+      camera: response.camera,
+    };
+  }
+
+  /**
+   * Queries the offscreen RGBA picking buffer at pixel or normalized coordinates `(u, v)`.
    */
   public async inspectPixel(
-    view: ViewDirection,
+    view: InspectViewId,
     u: number,
     v: number
   ): Promise<InspectResult> {
@@ -635,6 +836,7 @@ export class WsBridge {
       }
     }
     this.clients.clear();
+    this.clientRoles.clear();
 
     if (this.page && !this.page.isClosed()) {
       await this.page.close().catch(() => {});
