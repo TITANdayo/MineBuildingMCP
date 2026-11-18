@@ -74,6 +74,71 @@ export interface TraceRecord {
 
 export type ViewDirection = "NE" | "SE" | "SW" | "NW";
 
+export type InspectViewId = ViewDirection | "custom";
+
+export type CameraProjection = "perspective" | "orthographic";
+
+export type CameraPreset =
+  | "NE"
+  | "SE"
+  | "SW"
+  | "NW"
+  | "N"
+  | "S"
+  | "E"
+  | "W"
+  | "TOP"
+  | "FRONT"
+  | "BACK"
+  | "LEFT"
+  | "RIGHT"
+  | "RESET";
+
+export interface Vec3 {
+  x: number;
+  y: number;
+  z: number;
+}
+
+export interface CameraControlParams {
+  preset?: CameraPreset;
+  projection?: CameraProjection;
+  target?: Vec3;
+  position?: Vec3;
+  yaw?: number;
+  pitch?: number;
+  distance?: number;
+  zoom?: number;
+  fov?: number;
+  orthoSize?: number;
+  zoomFactor?: number;
+  deltaYaw?: number;
+  deltaPitch?: number;
+  deltaDistance?: number;
+  pan?: Partial<Vec3>;
+  resolution?: number;
+  syncViewer?: boolean;
+}
+
+export interface CameraStateSnapshot {
+  projection: CameraProjection;
+  position: Vec3;
+  target: Vec3;
+  yaw: number;
+  pitch: number;
+  distance: number;
+  zoom: number;
+  fov: number;
+  orthoSize: number;
+  resolution: number;
+  bounds: {
+    min: Vec3;
+    max: Vec3;
+    center: Vec3;
+    size: Vec3;
+  };
+}
+
 export interface InspectResult {
   hit: boolean;
   coord?: { x: number; y: number; z: number };
@@ -200,7 +265,8 @@ export type WsRequest =
       cutY: number;
       rooms?: RenderInteriorRoomCamera[];
     }
-  | { type: "INSPECT_PIXEL"; id: string; view: ViewDirection; u: number; v: number };
+  | { type: "RENDER_CAMERA"; id: string; params: CameraControlParams }
+  | { type: "INSPECT_PIXEL"; id: string; view: InspectViewId; u: number; v: number };
 
 export type WsResponse =
   | { type: "SYNC_ACK"; id: string }
@@ -211,5 +277,11 @@ export type WsResponse =
       cutY: number;
       cutawayImages: Record<ViewDirection, string>; // 4方向のドールハウス断面ビュー Base64 PNG
       roomEyeImages: Record<number, Record<CardinalDirection, string>>; // roomId -> { N, S, E, W } 室内一人称ビュー Base64 PNG
+    }
+  | {
+      type: "RENDER_CAMERA_RESULT";
+      id: string;
+      image: string;
+      camera: CameraStateSnapshot;
     }
   | { type: "INSPECT_RESULT"; id: string; data: InspectResult };

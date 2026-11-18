@@ -1,9 +1,9 @@
 import * as THREE from "three";
 import type {
   InspectResult,
+  InspectViewId,
   RawPickResult,
   TraceRecord,
-  ViewDirection,
   VoxelData
 } from "../types/shared.js";
 
@@ -33,8 +33,11 @@ export class OffscreenPickerPass {
   private renderTarget: THREE.WebGLRenderTarget;
   private currentResolution = 512;
 
-  // Cached RGBA8 pixel buffers per view direction from the latest render pass
-  private viewBuffers = new Map<ViewDirection, Uint8Array>();
+  // Cached RGBA8 pixel buffers per view direction (with each buffer's own resolution)
+  private viewBuffers = new Map<
+    InspectViewId,
+    { buffer: Uint8Array; resolution: number }
+  >();
 
   // World state lookup for <1ms coordinate -> VoxelData + TraceRecord + distanceToGround resolution
   private voxelMap = new Map<string, VoxelData>();
@@ -122,7 +125,7 @@ export class OffscreenPickerPass {
     return this.currentResolution;
   }
 
-  public hasCachedView(view: ViewDirection): boolean {
+  public hasCachedView(view: InspectViewId): boolean {
     return this.viewBuffers.has(view);
   }
 
@@ -133,7 +136,7 @@ export class OffscreenPickerPass {
    */
   public renderViewBuffer(
     renderer: THREE.WebGLRenderer,
-    view: ViewDirection,
+    view: InspectViewId,
     camera: THREE.Camera,
     resolution: number,
     overrideGeometry?: THREE.BufferGeometry
@@ -142,7 +145,6 @@ export class OffscreenPickerPass {
       this.renderTarget.dispose();
       this.renderTarget = this.createTarget(resolution);
       this.currentResolution = resolution;
-      this.viewBuffers.clear();
     }
 
     const prevGeometry = this.pickerMesh?.geometry;
@@ -183,7 +185,7 @@ export class OffscreenPickerPass {
     renderer.autoClear = prevAutoClear;
     renderer.setClearColor(prevClearColor, prevClearAlpha);
 
-    this.viewBuffers.set(view, byteBuffer);
+    this.viewBuffers.set(view, { buffer: byteBuffer, resolution });
     return byteBuffer;
   }
 
@@ -191,13 +193,13 @@ export class OffscreenPickerPass {
    * Performs <1ms raw pixel lookup in the cached ID buffer for `view` at image coordinates (u, v).
    * Note: Image (u, v) has origin (0, 0) at top-left; WebGL framebuffer has origin at bottom-left.
    */
-  public readRawPixel(view: ViewDirection, u: number, v: number): RawPickResult {
-    const buffer = this.viewBuffers.get(view);
-    if (!buffer) {
+  public readRawPixel(view: InspectViewId, u: number, v: number): RawPickResult {
+    const entry = this.viewBuffers.get(view);
+    if (!entry) {
       return { hit: false };
     }
 
-    const res = this.currentResolution;
+    const { buffer, resolution: res } = entry;
 
     // Support both pixel coordinates [0, res-1] and normalized coordinates (0, 1)
     const pxU = u > 0 && u < 1 && v > 0 && v < 1 ? Math.floor(u * res) : Math.floor(u);
@@ -266,7 +268,7 @@ export class OffscreenPickerPass {
   /**
    * Resolves (view, u, v) from the cached ID buffer into a full InspectResult in <1ms.
    */
-  public inspectPixel(view: ViewDirection, u: number, v: number): InspectResult {
+  public inspectPixel(view: InspectViewId, u: number, v: number): InspectResult {
     const raw = this.readRawPixel(view, u, v);
     if (!raw.hit || raw.x === undefined || raw.y === undefined || raw.z === undefined) {
       return { hit: false };
