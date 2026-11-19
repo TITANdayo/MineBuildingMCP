@@ -335,14 +335,15 @@ describe("Issue #3, #4, and Vertical Block Default Facing Unit Tests", () => {
       )
     ).toEqual([{ model: "hopper" }]);
 
-    // Observer defaults to facing=south
+    // Observer defaults to facing=south when north is not present (data-driven variant fallback)
     const observerDef: CompiledBlockDefinition = {
       blockName: "observer",
       variants: {
-        "facing=north": [{ model: "observer" }],
-        "facing=south": [{ model: "observer", y: 180 }],
+        "facing=south,powered=false": [{ model: "observer", y: 180 }],
+        "facing=south,powered=true": [{ model: "observer_on", y: 180 }],
+        "facing=east,powered=false": [{ model: "observer", y: 90 }],
       },
-      models: { observer: [] },
+      models: { observer: [], observer_on: [] },
       isFullOpaqueCube: true,
       isFluid: false,
       isTranslucent: false,

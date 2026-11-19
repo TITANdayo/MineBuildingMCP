@@ -1,6 +1,8 @@
 import {
   BlockState,
+  BuildLintReport,
   CardinalDirection,
+  CompiledBlockDefinition,
   InspectResult,
   InteriorAnalysisReport,
   InteriorFlowIssue,
@@ -10,6 +12,9 @@ import {
   TraceRecord,
   VoxelData,
 } from "../types/shared.js";
+import { defaultJarAssetLoader } from "../assets/jar-loader.js";
+import { resolveWorldBlockStates } from "./block-state-resolver.js";
+import { lintWorldStructure } from "./structure-linter.js";
 
 const AIR_BLOCKS = new Set([
   "air",
@@ -123,6 +128,8 @@ export class VoxelWorld {
   public initialTerrain: Map<string, VoxelData> = new Map();
   public traces: Map<number, TraceRecord> = new Map();
   public outOfBoundsCount = 0;
+  private explicitStateKeys: Map<string, Set<string>> = new Map();
+  private initialTerrainExplicitStateKeys: Map<string, Set<string>> = new Map();
 
   constructor(size: [number, number, number] = [32, 32, 32]) {
     if (!Array.isArray(size) || size.length !== 3) {
@@ -183,11 +190,18 @@ export class VoxelWorld {
 
     if (isAirBlock(normalized)) {
       this.voxels.delete(key);
+      this.explicitStateKeys.delete(key);
       if (isTerrain) {
         this.initialTerrain.delete(key);
+        this.initialTerrainExplicitStateKeys.delete(key);
       }
       return true;
     }
+
+    const explicitKeys = new Set<string>(
+      state ? Object.keys(state).map((k) => k.toLowerCase()) : []
+    );
+    this.explicitStateKeys.set(key, explicitKeys);
 
     const voxel: VoxelData = {
       x: ix,
@@ -205,6 +219,7 @@ export class VoxelWorld {
         ...voxel,
         ...(voxel.state ? { state: { ...voxel.state } } : {}),
       });
+      this.initialTerrainExplicitStateKeys.set(key, new Set(explicitKeys));
     }
     return true;
   }
@@ -231,25 +246,71 @@ export class VoxelWorld {
     return Array.from(this.voxels.values());
   }
 
+  public getExplicitStateKeysMap(): Map<string, Set<string>> {
+    return this.explicitStateKeys;
+  }
+
+  /**
+   * Resolves and updates neighbor-dependent block states (fences, walls, panes/bars,
+   * stairs, fence gates, and hanging/clinging multiface blocks like vines) across
+   * the world using compiled JAR blockstate & tag definitions.
+   * Preserves user-explicit state keys while refreshing auto-computed keys.
+   */
+  public resolveBlockStates(
+    blockModels: Record<string, CompiledBlockDefinition>
+  ): number {
+    const allVoxels = this.getAllVoxels();
+    if (allVoxels.length === 0) return 0;
+
+    const resolvedMap = resolveWorldBlockStates(
+      allVoxels,
+      blockModels,
+      this.explicitStateKeys
+    );
+    let updatedCount = 0;
+
+    for (const [key, resolvedState] of resolvedMap.entries()) {
+      const voxel = this.voxels.get(key);
+      if (!voxel) continue;
+      if (Object.keys(resolvedState).length > 0) {
+        voxel.state = { ...resolvedState };
+        updatedCount++;
+      }
+    }
+    return updatedCount;
+  }
+
   public saveInitialTerrainSnapshot(): void {
     this.initialTerrain.clear();
+    this.initialTerrainExplicitStateKeys.clear();
     for (const [key, voxel] of this.voxels.entries()) {
       if (voxel.isTerrain) {
         this.initialTerrain.set(key, {
           ...voxel,
           ...(voxel.state ? { state: { ...voxel.state } } : {}),
         });
+        const exp = this.explicitStateKeys.get(key);
+        this.initialTerrainExplicitStateKeys.set(
+          key,
+          new Set(exp ?? Object.keys(voxel.state ?? {}).map((k) => k.toLowerCase()))
+        );
       }
     }
   }
 
   public resetBuild(): void {
     this.voxels.clear();
+    this.explicitStateKeys.clear();
     for (const [key, voxel] of this.initialTerrain.entries()) {
       this.voxels.set(key, {
         ...voxel,
         ...(voxel.state ? { state: { ...voxel.state } } : {}),
       });
+      const exp = this.initialTerrainExplicitStateKeys.get(key);
+      this.explicitStateKeys.set(
+        key,
+        new Set(exp ?? Object.keys(voxel.state ?? {}).map((k) => k.toLowerCase()))
+      );
     }
     this.traces.clear();
     this.outOfBoundsCount = 0;
@@ -258,6 +319,8 @@ export class VoxelWorld {
   public clear(): void {
     this.voxels.clear();
     this.initialTerrain.clear();
+    this.explicitStateKeys.clear();
+    this.initialTerrainExplicitStateKeys.clear();
     this.traces.clear();
     this.outOfBoundsCount = 0;
   }
@@ -465,7 +528,46 @@ export class VoxelWorld {
     };
   }
 
-  public evaluateStructure(): StructureEvaluation {
+  /**
+   * Runs the static Vanilla Building Linter on the current world, checking for
+   * single-axis slender block T/L-junction mismatches (`axis_mismatch_junction`)
+   * and missing attachment/ceiling/floor support (`missing_support`).
+   */
+  public lintStructure(
+    blockModels?: Record<string, CompiledBlockDefinition>
+  ): BuildLintReport {
+    const allVoxels = this.getAllVoxels();
+    if (allVoxels.length === 0) {
+      return {
+        valid: true,
+        issueCount: 0,
+        countsByType: {
+          axis_mismatch_junction: 0,
+          missing_support: 0,
+        },
+        issues: [],
+        summaryText:
+          "Vanilla Building Linter: PASSED (0 spec/support issues detected).",
+      };
+    }
+
+    let effectiveModels = blockModels;
+    if (!effectiveModels && defaultJarAssetLoader.getJarPath() !== null) {
+      const uniqueNames = Array.from(new Set(allVoxels.map((v) => v.name)));
+      effectiveModels = defaultJarAssetLoader.getBlockModelsForBlocks(uniqueNames);
+    }
+
+    return lintWorldStructure(
+      allVoxels,
+      effectiveModels,
+      this.traces,
+      this.explicitStateKeys
+    );
+  }
+
+  public evaluateStructure(
+    blockModels?: Record<string, CompiledBlockDefinition>
+  ): StructureEvaluation {
     const buildBlocks: VoxelData[] = [];
     const groundedKeys = new Set<string>();
     const queue: VoxelData[] = [];
@@ -590,6 +692,8 @@ export class VoxelWorld {
       );
     }
 
+    const lintReport = this.lintStructure(blockModels);
+
     return {
       valid: floatingBlocks.length === 0 && this.outOfBoundsCount === 0,
       totalBuildBlocks: buildBlocks.length,
@@ -597,6 +701,7 @@ export class VoxelWorld {
       floatingClustersCount,
       outOfBoundsCount: this.outOfBoundsCount,
       warnings,
+      lintIssues: lintReport.issues,
     };
   }
 

@@ -1,14 +1,23 @@
 import * as THREE from "three";
+import {
+  ALL_DIRS,
+  DIR_VECTORS,
+  evaluateMultipartCondition,
+  getBlockDef,
+  isInstanceFullOpaqueCube,
+  resolveActiveModelParts,
+  resolveWorldBlockStates,
+} from "../core/block-state-resolver.js";
 import type {
-  AppliedModelRef,
   CompiledBlockDefinition,
   McFaceDirection,
-  MultipartCondition,
   ResolvedModelElement,
   ResolvedModelElementRotation,
   ViewDirection,
   VoxelData,
 } from "../types/shared.js";
+
+export { evaluateMultipartCondition, resolveActiveModelParts };
 
 export interface BuiltWorldMeshes {
   visualGroup: THREE.Group;
@@ -171,486 +180,7 @@ async function resolveTextureAsset(
   return proc;
 }
 
-const ALL_DIRS: McFaceDirection[] = ["down", "up", "north", "south", "west", "east"];
-
-const DIR_VECTORS: Record<McFaceDirection, [number, number, number]> = {
-  down: [0, -1, 0],
-  up: [0, 1, 0],
-  north: [0, 0, -1],
-  south: [0, 0, 1],
-  west: [-1, 0, 0],
-  east: [1, 0, 0],
-};
-
-const CANONICAL_STATE_DEFAULTS: Record<string, string> = {
-  facing: "north",
-  half: "bottom",
-  type: "bottom",
-  shape: "straight",
-  axis: "y",
-  hanging: "false",
-  open: "false",
-  powered: "false",
-  waterlogged: "false",
-  up: "true",
-  down: "false",
-  north: "none",
-  south: "none",
-  east: "none",
-  west: "none",
-  snowy: "false",
-  lit: "true",
-  part: "foot",
-  hinge: "left",
-  mode: "compare",
-  attachment: "floor",
-  face: "wall",
-  rotation: "0",
-  age: "0",
-  level: "0",
-  stage: "0",
-  moisture: "0",
-  bites: "0",
-  layers: "1",
-  eggs: "1",
-  pickles: "1",
-  honey_level: "0",
-  distance: "1",
-  persistent: "false",
-  extended: "false",
-  conditional: "false",
-  occupied: "false",
-  triggered: "false",
-  has_bottle_0: "false",
-  has_bottle_1: "false",
-  has_bottle_2: "false",
-  eye: "false",
-  inverted: "false",
-  locked: "false",
-  in_wall: "false",
-  attached: "false",
-  disarmed: "false",
-  short: "false",
-  bottom: "false",
-  drag: "true",
-};
-
-function getDefaultPropValue(
-  def: CompiledBlockDefinition,
-  prop: string
-): string | undefined {
-  if (prop === "facing") {
-    const name = normalizeBlockName(def.blockName);
-    if (
-      name === "end_rod" ||
-      name === "lightning_rod" ||
-      name.endsWith("_lightning_rod") ||
-      name === "amethyst_cluster" ||
-      name.endsWith("_amethyst_bud")
-    ) {
-      return "up";
-    }
-    if (name === "hopper") {
-      return "down";
-    }
-    if (name === "observer") {
-      return "south";
-    }
-    if (name === "barrel") {
-      return "north";
-    }
-    if (def.variants) {
-      const keys = Object.keys(def.variants);
-      const hasNorth = keys.some((k) => /(^|,)facing=north(,|$)/i.test(k));
-      if (!hasNorth) {
-        if (keys.some((k) => /(^|,)facing=up(,|$)/i.test(k))) {
-          return "up";
-        }
-        if (keys.some((k) => /(^|,)facing=down(,|$)/i.test(k))) {
-          return "down";
-        }
-      }
-    }
-  }
-  return CANONICAL_STATE_DEFAULTS[prop];
-}
-
-function getFallbackBlockDef(blockName: string): CompiledBlockDefinition {
-  const shortName = normalizeBlockName(blockName);
-  const faces = Object.fromEntries(
-    ALL_DIRS.map((dir) => [dir, { textureKey: shortName, cullface: dir }])
-  );
-  return {
-    blockName: shortName,
-    variants: { "": [{ model: shortName }] },
-    models: {
-      [shortName]: [{ from: [0, 0, 0], to: [16, 16, 16], faces }],
-    },
-    isFullOpaqueCube: true,
-    isFluid: false,
-    isTranslucent: false,
-  };
-}
-
-function getBlockDef(
-  blockName: string,
-  blockModels?: Record<string, CompiledBlockDefinition>
-): CompiledBlockDefinition {
-  if (blockModels) {
-    const direct = blockModels[blockName];
-    if (direct) return direct;
-    const shortName = normalizeBlockName(blockName);
-    const byShort = blockModels[shortName];
-    if (byShort) return byShort;
-    const byPrefixed = blockModels[`minecraft:${shortName}`];
-    if (byPrefixed) return byPrefixed;
-  }
-  return getFallbackBlockDef(blockName);
-}
-
-function hasVariantProp(def: CompiledBlockDefinition, propName: string): boolean {
-  if (!def.variants) return false;
-  const token = `${propName}=`;
-  return Object.keys(def.variants).some((k) => k.includes(token));
-}
-
-function getMultipartCardinalSignature(def: CompiledBlockDefinition): string | null {
-  if (!def.multipart) return null;
-  const vals = new Set<string>();
-  const collect = (cond?: MultipartCondition) => {
-    if (!cond) return;
-    if (Array.isArray(cond.OR)) cond.OR.forEach(collect);
-    if (Array.isArray(cond.AND)) cond.AND.forEach(collect);
-    for (const d of ["north", "south", "east", "west"]) {
-      if (cond[d] !== undefined) {
-        for (const opt of String(cond[d]).split("|")) {
-          vals.add(opt);
-        }
-      }
-    }
-    if (cond.up !== undefined) vals.add("has_up");
-  };
-  for (const mc of def.multipart) collect(mc.when);
-  if (vals.size === 0) return null;
-  return Array.from(vals).sort().join(",");
-}
-
-function dirLeft(facing: string): string {
-  switch (facing) {
-    case "north":
-      return "west";
-    case "west":
-      return "south";
-    case "south":
-      return "east";
-    case "east":
-      return "north";
-    default:
-      return "west";
-  }
-}
-
-function dirRight(facing: string): string {
-  switch (facing) {
-    case "north":
-      return "east";
-    case "east":
-      return "south";
-    case "south":
-      return "west";
-    case "west":
-      return "north";
-    default:
-      return "east";
-  }
-}
-
-function horizDelta(dir: string): [number, number] {
-  switch (dir) {
-    case "north":
-      return [0, -1];
-    case "south":
-      return [0, 1];
-    case "west":
-      return [-1, 0];
-    case "east":
-      return [1, 0];
-    default:
-      return [0, -1];
-  }
-}
-
-function computeDynamicStairShape(
-  voxel: VoxelData,
-  effectiveState: Record<string, string>,
-  voxelMap: Map<string, VoxelData>,
-  blockModels?: Record<string, CompiledBlockDefinition>
-): string {
-  const facing = effectiveState.facing ?? "north";
-  const half = effectiveState.half ?? "bottom";
-
-  const getStairState = (dx: number, dz: number): { facing: string; half: string } | null => {
-    const neighbor = voxelMap.get(`${voxel.x + dx},${voxel.y},${voxel.z + dz}`);
-    if (!neighbor) return null;
-    const nDef = getBlockDef(neighbor.name, blockModels);
-    if (!hasVariantProp(nDef, "shape")) return null;
-    return {
-      facing: (neighbor.state?.facing ?? "north").toLowerCase(),
-      half: (neighbor.state?.half ?? "bottom").toLowerCase(),
-    };
-  };
-
-  const [fx, fz] = horizDelta(facing);
-  const front = getStairState(fx, fz);
-  const left = dirLeft(facing);
-  const right = dirRight(facing);
-
-  if (front && front.half === half) {
-    if (front.facing === left) {
-      const [rx, rz] = horizDelta(right);
-      const side = getStairState(rx, rz);
-      if (!side || side.half !== half || side.facing !== facing) {
-        return "outer_left";
-      }
-    } else if (front.facing === right) {
-      const [lx, lz] = horizDelta(left);
-      const side = getStairState(lx, lz);
-      if (!side || side.half !== half || side.facing !== facing) {
-        return "outer_right";
-      }
-    }
-  }
-
-  const back = getStairState(-fx, -fz);
-  if (back && back.half === half) {
-    if (back.facing === left) {
-      const [lx, lz] = horizDelta(left);
-      const side = getStairState(lx, lz);
-      if (!side || side.half !== half || side.facing !== facing) {
-        return "inner_left";
-      }
-    } else if (back.facing === right) {
-      const [rx, rz] = horizDelta(right);
-      const side = getStairState(rx, rz);
-      if (!side || side.half !== half || side.facing !== facing) {
-        return "inner_right";
-      }
-    }
-  }
-
-  return "straight";
-}
-
-function collectMultipartDirValues(def: CompiledBlockDefinition): Record<string, Set<string>> {
-  const map: Record<string, Set<string>> = {};
-  if (!def.multipart) return map;
-
-  const visit = (cond?: MultipartCondition) => {
-    if (!cond) return;
-    if (Array.isArray(cond.OR)) cond.OR.forEach(visit);
-    if (Array.isArray(cond.AND)) cond.AND.forEach(visit);
-    for (const [k, rawVal] of Object.entries(cond)) {
-      if (k === "OR" || k === "AND" || rawVal === undefined) continue;
-      if (!map[k]) map[k] = new Set();
-      for (const opt of String(rawVal).split("|")) {
-        map[k].add(opt);
-      }
-    }
-  };
-
-  for (const mc of def.multipart) {
-    visit(mc.when);
-  }
-  return map;
-}
-
-function evaluateMultipartCondition(
-  cond: MultipartCondition | undefined,
-  state: Record<string, string>
-): boolean {
-  if (!cond) return true;
-  if (Array.isArray(cond.OR)) {
-    if (!cond.OR.some((sub) => evaluateMultipartCondition(sub, state))) {
-      return false;
-    }
-  }
-  if (Array.isArray(cond.AND)) {
-    if (!cond.AND.every((sub) => evaluateMultipartCondition(sub, state))) {
-      return false;
-    }
-  }
-  for (const [k, rawExpected] of Object.entries(cond)) {
-    if (k === "OR" || k === "AND" || rawExpected === undefined) continue;
-    const expectedOpts = String(rawExpected).split("|");
-    const actual = state[k] ?? CANONICAL_STATE_DEFAULTS[k] ?? "false";
-    if (!expectedOpts.includes(actual)) {
-      return false;
-    }
-  }
-  return true;
-}
-
-export function resolveActiveModelParts(
-  voxel: VoxelData,
-  def: CompiledBlockDefinition,
-  voxelMap: Map<string, VoxelData>,
-  blockModels?: Record<string, CompiledBlockDefinition>
-): AppliedModelRef[] {
-  if (def.multipart && def.multipart.length > 0) {
-    const dirValues = collectMultipartDirValues(def);
-    const mySig = getMultipartCardinalSignature(def);
-    const effectiveState: Record<string, string> = {};
-    if (voxel.state) {
-      for (const [k, v] of Object.entries(voxel.state)) {
-        effectiveState[k.toLowerCase()] = String(v).toLowerCase();
-      }
-    }
-
-    const canConnectTo = (dx: number, dz: number): boolean => {
-      const neighbor = voxelMap.get(`${voxel.x + dx},${voxel.y},${voxel.z + dz}`);
-      if (!neighbor) return false;
-      const nDef = getBlockDef(neighbor.name, blockModels);
-      if (nDef.isFluid) return false;
-      if (nDef.isFullOpaqueCube) return true;
-      if (nDef.blockName === def.blockName) return true;
-      if (mySig && getMultipartCardinalSignature(nDef) === mySig) return true;
-      return false;
-    };
-
-    const aboveVoxel = voxelMap.get(`${voxel.x},${voxel.y + 1},${voxel.z}`);
-    const aboveDef = aboveVoxel ? getBlockDef(aboveVoxel.name, blockModels) : null;
-    const aboveConnectsSolid = Boolean(
-      aboveDef &&
-        !aboveDef.isFluid &&
-        (aboveDef.isFullOpaqueCube || aboveDef.blockName === def.blockName)
-    );
-
-    for (const dir of ["north", "south", "east", "west"] as const) {
-      if (!(dir in effectiveState) && dirValues[dir]) {
-        const [dx, dz] = horizDelta(dir);
-        const connected = canConnectTo(dx, dz);
-        const usesWallHeights =
-          dirValues[dir].has("low") || dirValues[dir].has("tall");
-        if (usesWallHeights) {
-          effectiveState[dir] = connected
-            ? aboveConnectsSolid
-              ? "tall"
-              : "low"
-            : "none";
-        } else {
-          effectiveState[dir] = connected ? "true" : "false";
-        }
-      }
-    }
-
-    if (!("up" in effectiveState) && dirValues.up) {
-      const isConn = (v?: string) => Boolean(v && v !== "false" && v !== "none");
-      const nC = isConn(effectiveState.north);
-      const sC = isConn(effectiveState.south);
-      const eC = isConn(effectiveState.east);
-      const wC = isConn(effectiveState.west);
-      const straightNS = nC && sC && !eC && !wC;
-      const straightEW = eC && wC && !nC && !sC;
-      if (aboveVoxel && aboveDef && !aboveDef.isFluid) {
-        effectiveState.up = "true";
-      } else if (straightNS || straightEW) {
-        effectiveState.up = "false";
-      } else {
-        effectiveState.up = "true";
-      }
-    }
-
-    const activeRefs: AppliedModelRef[] = [];
-    for (const mc of def.multipart) {
-      if (evaluateMultipartCondition(mc.when, effectiveState)) {
-        for (const ref of mc.apply) {
-          activeRefs.push(ref);
-        }
-      }
-    }
-    return activeRefs;
-  }
-
-  if (def.variants) {
-    const entries = Object.entries(def.variants);
-    if (entries.length === 0) return [];
-    if (entries.length === 1 && entries[0][0] === "") {
-      return entries[0][1];
-    }
-
-    const effectiveState: Record<string, string> = {};
-    if (voxel.state) {
-      for (const [k, v] of Object.entries(voxel.state)) {
-        effectiveState[k.toLowerCase()] = String(v).toLowerCase();
-      }
-    }
-
-    const usesType = hasVariantProp(def, "type");
-    const usesHalf = hasVariantProp(def, "half");
-    if (usesType && !("type" in effectiveState) && "half" in effectiveState) {
-      effectiveState.type = effectiveState.half;
-    }
-    if (usesHalf && !("half" in effectiveState) && "type" in effectiveState) {
-      effectiveState.half = effectiveState.type;
-    }
-
-    if (hasVariantProp(def, "shape") && !("shape" in effectiveState)) {
-      effectiveState.shape = computeDynamicStairShape(
-        voxel,
-        effectiveState,
-        voxelMap,
-        blockModels
-      );
-    }
-
-    let bestRefs = entries[0][1];
-    let bestScore = -Infinity;
-
-    for (const [key, refs] of entries) {
-      if (key === "") {
-        if (0 > bestScore) {
-          bestScore = 0;
-          bestRefs = refs;
-        }
-        continue;
-      }
-
-      const pairs = key.split(",");
-      let score = 0;
-      let valid = true;
-
-      for (const pair of pairs) {
-        const eqIdx = pair.indexOf("=");
-        if (eqIdx === -1) continue;
-        const prop = pair.slice(0, eqIdx).trim().toLowerCase();
-        const val = pair.slice(eqIdx + 1).trim().toLowerCase();
-
-        if (prop in effectiveState) {
-          if (effectiveState[prop] === val) {
-            score += 100;
-          } else {
-            valid = false;
-            break;
-          }
-        } else if (getDefaultPropValue(def, prop) === val) {
-          score += 1;
-        }
-      }
-
-      if (valid && score > bestScore) {
-        bestScore = score;
-        bestRefs = refs;
-      }
-    }
-
-    return bestRefs;
-  }
-
-  const firstModelKey = Object.keys(def.models)[0];
-  return firstModelKey ? [{ model: firstModelKey }] : [];
-}
-
-function getUnrotatedFaceCorners(
+export function getUnrotatedFaceCorners(
   dir: McFaceDirection,
   from: [number, number, number],
   to: [number, number, number]
@@ -730,7 +260,7 @@ function getUnrotatedFaceCorners(
   }
 }
 
-function getDefaultFaceUv(
+export function getDefaultFaceUv(
   dir: McFaceDirection,
   from: [number, number, number],
   to: [number, number, number]
@@ -794,7 +324,7 @@ function rotatePointAroundAxis(
   ];
 }
 
-function applyElementRotation(
+export function applyElementRotation(
   p: [number, number, number],
   rot: ResolvedModelElementRotation,
   isNormal: boolean
@@ -820,7 +350,7 @@ function applyElementRotation(
   return out;
 }
 
-function applyBlockstateRotation(
+export function applyBlockstateRotation(
   p: [number, number, number],
   stepsX: number,
   stepsY: number,
@@ -864,7 +394,7 @@ function vectorToFaceDirection(n: [number, number, number]): McFaceDirection {
   return n[0] >= 0 ? "east" : "west";
 }
 
-function computeBoxLockedUv(
+export function computeBoxLockedUv(
   faceDir: McFaceDirection,
   lx: number,
   ly: number,
@@ -914,39 +444,6 @@ function isCoplanarWithPreviousElement(
     }
   }
   return false;
-}
-
-function isInstanceFullOpaqueCube(
-  voxel: VoxelData,
-  def: CompiledBlockDefinition,
-  voxelMap: Map<string, VoxelData>,
-  blockModels?: Record<string, CompiledBlockDefinition>
-): boolean {
-  if (def.isFullOpaqueCube) return true;
-  if (def.isFluid || def.isTranslucent || !def.variants) return false;
-
-  const refs = resolveActiveModelParts(voxel, def, voxelMap, blockModels);
-  if (refs.length !== 1) return false;
-  const elements = def.models[refs[0].model];
-  if (!elements || elements.length === 0) return false;
-
-  const covered = new Set<McFaceDirection>();
-  for (const el of elements) {
-    if (el.rotation) continue;
-    if (
-      el.from[0] === 0 &&
-      el.from[1] === 0 &&
-      el.from[2] === 0 &&
-      el.to[0] === 16 &&
-      el.to[1] === 16 &&
-      el.to[2] === 16
-    ) {
-      for (const dir of ALL_DIRS) {
-        if (el.faces[dir]) covered.add(dir);
-      }
-    }
-  }
-  return ALL_DIRS.every((d) => covered.has(d));
 }
 
 function shouldCullFace(
@@ -1021,6 +518,10 @@ export async function buildWorldMeshes(
     voxelMap.set(`${v.x},${v.y},${v.z}`, v);
   }
 
+  const resolvedStates = blockModels
+    ? resolveWorldBlockStates(voxels, blockModels)
+    : undefined;
+
   const pickPositions: number[] = [];
   const pickIndices: number[] = [];
   const pickBytes: number[] = [];
@@ -1049,7 +550,13 @@ export async function buildWorldMeshes(
     if (voxel.z + 1 > maxZ) maxZ = voxel.z + 1;
 
     const def = getBlockDef(voxel.name, blockModels);
-    const activeParts = resolveActiveModelParts(voxel, def, voxelMap, blockModels);
+    const activeParts = resolveActiveModelParts(
+      voxel,
+      def,
+      voxelMap,
+      blockModels,
+      resolvedStates
+    );
 
     const rByte = Math.max(0, Math.min(255, voxel.x));
     const gByte = Math.max(0, Math.min(255, voxel.y));
@@ -1114,7 +621,7 @@ export async function buildWorldMeshes(
           }
           rotNormal = applyBlockstateRotation(rotNormal, stepsX, stepsY, false);
           const rotFaceDir = vectorToFaceDirection(rotNormal);
-          const shade = computeShadeFactor(rotNormal);
+          const shade = el.shade === false ? 1.0 : computeShadeFactor(rotNormal);
 
           const worldCorners: [number, number, number][] = [];
           const cornerUvs: [number, number][] = [];

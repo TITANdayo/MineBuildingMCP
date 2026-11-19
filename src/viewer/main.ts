@@ -190,9 +190,15 @@ class MineBuildingViewer {
 
     this.updateGridHelper([32, 32, 32]);
     this.bindEvents();
-    this.initDefaultPreviewWorld();
+    const isHeadless =
+      new URLSearchParams(window.location.search).get("client") === "headless";
+    if (!isHeadless) {
+      this.initDefaultPreviewWorld();
+    }
     this.connectWebSocket();
-    this.animate();
+    if (!isHeadless) {
+      this.animate();
+    }
   }
 
   private disposeGroupGeometries(group: THREE.Group): void {

@@ -1,7 +1,9 @@
 import * as fs from "node:fs/promises";
 import * as zlib from "node:zlib";
 import * as nbtNamespace from "prismarine-nbt";
-import { BlockState } from "../types/shared.js";
+import { defaultJarAssetLoader } from "../assets/jar-loader.js";
+import { BlockState, CompiledBlockDefinition } from "../types/shared.js";
+import { resolveWorldBlockStates } from "./block-state-resolver.js";
 import {
   BedrockStateMap,
   bedrockToJavaState,
@@ -188,9 +190,32 @@ export async function parseMcstructureBuffer(
   return parseMcstructureFromNbt(parsed);
 }
 
+function computeResolvedExportStates(
+  world: VoxelWorld,
+  blockModels?: Record<string, CompiledBlockDefinition>
+): Map<string, BlockState> {
+  const allVoxels = world.getAllVoxels();
+  if (allVoxels.length === 0) return new Map();
+
+  let effectiveModels = blockModels;
+  if (!effectiveModels && defaultJarAssetLoader.getJarPath() !== null) {
+    const uniqueNames = Array.from(new Set(allVoxels.map((v) => v.name)));
+    effectiveModels = defaultJarAssetLoader.getBlockModelsForBlocks(uniqueNames);
+  }
+  if (!effectiveModels) return new Map();
+
+  return resolveWorldBlockStates(
+    allVoxels,
+    effectiveModels,
+    world.getExplicitStateKeysMap()
+  );
+}
+
 export async function serializeMcstructureBuffer(
-  world: VoxelWorld
+  world: VoxelWorld,
+  blockModels?: Record<string, CompiledBlockDefinition>
 ): Promise<Buffer> {
+  const resolvedStates = computeResolvedExportStates(world, blockModels);
   const [sizeX, sizeY, sizeZ] = world.size;
   const totalVoxels = sizeX * sizeY * sizeZ;
   const layer0 = new Array<number>(totalVoxels).fill(-1);
@@ -220,10 +245,13 @@ export async function serializeMcstructureBuffer(
         if (!voxel || isAirBlock(voxel.name)) {
           continue;
         }
-        const key = makePaletteKey(voxel.name, voxel.state);
+        const resolved = resolvedStates.get(VoxelWorld.coordKey(x, y, z));
+        const effectiveState =
+          resolved && Object.keys(resolved).length > 0 ? resolved : voxel.state;
+        const key = makePaletteKey(voxel.name, effectiveState);
         let pEntry = paletteMap.get(key);
         if (!pEntry) {
-          const translated = javaToBedrockState(voxel.name, voxel.state);
+          const translated = javaToBedrockState(voxel.name, effectiveState);
           pEntry = {
             index: paletteMap.size,
             bedrockName: translated.name,
@@ -306,9 +334,10 @@ export async function loadMcstructure(filePath: string): Promise<VoxelWorld> {
 
 export async function saveMcstructure(
   world: VoxelWorld,
-  filePath: string
+  filePath: string,
+  blockModels?: Record<string, CompiledBlockDefinition>
 ): Promise<void> {
-  const buffer = await serializeMcstructureBuffer(world);
+  const buffer = await serializeMcstructureBuffer(world, blockModels);
   await fs.writeFile(filePath, buffer);
 }
 
@@ -416,8 +445,10 @@ function makePaletteKey(name: string, state?: BlockState): string {
 }
 
 export async function serializeStructureNbtBuffer(
-  world: VoxelWorld
+  world: VoxelWorld,
+  blockModels?: Record<string, CompiledBlockDefinition>
 ): Promise<Buffer> {
+  const resolvedStates = computeResolvedExportStates(world, blockModels);
   const paletteMap = new Map<
     string,
     { index: number; name: string; state?: BlockState }
@@ -434,14 +465,19 @@ export async function serializeStructureNbtBuffer(
 
   for (const voxel of allVoxels) {
     if (isAirBlock(voxel.name)) continue;
-    const key = makePaletteKey(voxel.name, voxel.state);
+    const resolved = resolvedStates.get(
+      VoxelWorld.coordKey(voxel.x, voxel.y, voxel.z)
+    );
+    const effectiveState =
+      resolved && Object.keys(resolved).length > 0 ? resolved : voxel.state;
+    const key = makePaletteKey(voxel.name, effectiveState);
     let pEntry = paletteMap.get(key);
     if (!pEntry) {
       pEntry = {
         index: paletteMap.size,
         name: normalizeBlockName(voxel.name),
-        ...(voxel.state && Object.keys(voxel.state).length > 0
-          ? { state: { ...voxel.state } }
+        ...(effectiveState && Object.keys(effectiveState).length > 0
+          ? { state: { ...effectiveState } }
           : {}),
       };
       paletteMap.set(key, pEntry);
@@ -536,12 +572,13 @@ export async function serializeStructureNbtBuffer(
 
 export async function saveStructureNbt(
   world: VoxelWorld,
-  filePath: string
+  filePath: string,
+  blockModels?: Record<string, CompiledBlockDefinition>
 ): Promise<void> {
   if (filePath.toLowerCase().endsWith(".mcstructure")) {
-    await saveMcstructure(world, filePath);
+    await saveMcstructure(world, filePath, blockModels);
     return;
   }
-  const gzipped = await serializeStructureNbtBuffer(world);
+  const gzipped = await serializeStructureNbtBuffer(world, blockModels);
   await fs.writeFile(filePath, gzipped);
 }

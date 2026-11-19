@@ -19,12 +19,16 @@ import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import {
   CallToolRequestSchema,
+  GetPromptRequestSchema,
+  ListPromptsRequestSchema,
   ListToolsRequestSchema,
   type CallToolResult,
+  type GetPromptResult,
 } from "@modelcontextprotocol/sdk/types.js";
-import { JarAssetLoader } from "../assets/jar-loader.js";
+import { defaultJarAssetLoader, JarAssetLoader } from "../assets/jar-loader.js";
 import { executeBuildScript } from "../core/builder-dsl.js";
 import { loadStructureNbt, saveStructureNbt } from "../core/nbt-io.js";
+import { formatLintReportSummary } from "../core/structure-linter.js";
 import { VoxelWorld } from "../core/voxel-world.js";
 import type {
   CameraControlParams,
@@ -245,6 +249,33 @@ function stripDataUrlPrefix(base64OrDataUrl: string): string {
   return base64OrDataUrl;
 }
 
+export function buildArchitecturalWorkflowPrompt(theme?: string): string {
+  const targetTheme = theme?.trim() ? `「${theme.trim()}」` : "対象テーマ";
+  return [
+    `# MineBuildingMCP 標準建築ワークフロー＆設計前リサーチ指針（${targetTheme}）`,
+    "",
+    "Minecraft建築を開始する際は、いきなり `run_build_script` でDSLを書き始めず、必ず以下の3フェーズを順番に実行してください。",
+    "",
+    "## Phase 1: 設計前リサーチ（Minecraft建築の定番イディオム調査）",
+    `建築テーマ（${targetTheme}）やモチーフが決まったら、まずWeb検索（\`search_web\` 等）を用いて **そのテーマにおけるMinecraft特有の建築イディオム・表現技法** を調査・整理してください：`,
+    "1. **屋根の勾配と軒先（Roof Pitch & Overhangs）**：階段・ハーフブロック・フルブロックの組み合わせ比率（急勾配のゴシック屋根 vs 緩勾配の和風/ファンタジー屋根）、破風（Gable）やドーマーの縁取り表現。",
+    "2. **壁面の奥行きとフレーム構造（Wall Depth & Framing）**：のっぺりした1層の壁を避け、柱（原木・石レンガ塀）を1ブロック手前に出す2層構造や、階段・トラップドア・塀（`*_wall`）による凹凸ディテール。",
+    "3. **ブロックパレットの混色（Palette Texturing & Gradient）**：単一ブロックのベタ塗りを避け、同系色3〜4種類（例：`stone_bricks` + `cracked_stone_bricks` + `andesite` + `mossy_stone_bricks`）をグラデーションやノイズ状に混ぜる手法。",
+    "4. **鎖・照明・接続パーツのバニラ仕様（Vanilla Block Mechanics）**：",
+    "   - **鎖（`chain` / `iron_chain`）のT字・L字直結禁止**：Minecraftの鎖は単一軸（`axis=x/y/z`）しか持てず、横方向の鎖（`axis=x/z`）の途中から縦方向の鎖（`axis=y`）や吊り下げランタンを直接分岐させると見た目が破綻します。必ず交点に **フェンス（`*_fence`）・塀（`*_wall`）・砥石（`grindstone`）・ホッパー（`hopper`）・フルブロック** 等の中継パーツを噛ませてください。",
+    "   - **支持体（Support Block）の確保**：吊り下げランタン（`hanging=true`）の直上、壁張り付きブロック（`vine` / `glow_lichen`）の背面、壁掛け松明等の接続面には必ず有効な支持ブロックを配置してください。",
+    "",
+    "## Phase 2: 地形読み込みと段階的DSL構築",
+    "- `load_terrain` で地形のHeightmapと傾斜を確認し、`placeFoundation` 等で土台を接地させてから外壁・屋根・内装を構築します。",
+    "",
+    "## Phase 3: バニラ建築整合性リンター（`lint_structure`）と視覚確認ループ",
+    "- `run_build_script` 実行時に自動出力される **Vanilla Building Linter** の警告、または `lint_structure` ツールを実行して、以下が **0件** になるまで修正を繰り返してください：",
+    "  - `axis_mismatch_junction`：鎖などの単軸細身ブロックが異なる `axis` で直接隣接している箇所（交点にフェンス・塀・砥石・フルブロック等を挟んで解決）。",
+    "  - `missing_support`：ツタ等の壁張り付きブロックや `hanging=true/false` のランタン等の支持先が空気（または横向きの鎖など非支持ブロック）になっている箇所。",
+    "- 視覚的に気になる箇所は `render_camera` でズームし、`inspect_pixel(view, u, v)` で3D座標とDSL行番号（`line`）を逆引きしてピンポイントで修正してから `export_structure` で完了としてください。",
+  ].join("\n");
+}
+
 function formatBuildReport(
   opCount: number,
   traces: Record<number, TraceRecord>,
@@ -291,6 +322,11 @@ function formatBuildReport(
     }
   }
 
+  const lintIssues = evaluation.lintIssues ?? [];
+  lines.push("");
+  lines.push("--- Vanilla Building Linter (Minecraft Block Spec Check) ---");
+  lines.push(formatLintReportSummary(lintIssues));
+
   const traceEntries = Object.values(traces).sort((a, b) => a.opId - b.opId);
   if (traceEntries.length > 0) {
     lines.push("");
@@ -302,7 +338,7 @@ function formatBuildReport(
 
   lines.push("");
   lines.push(
-    `Rendered 4 Orthographic Views (NE, SE, SW, NW) at ${resolution}x${resolution}px. Use inspect_pixel(view, u, v) with u,v in [0.0, 1.0] to query exact 3D coordinates and source code lines for any pixel.`
+    `Rendered 4 Orthographic Views (NE, SE, SW, NW) at ${resolution}x${resolution}px. Use inspect_pixel(view, u, v) with u,v in [0.0, 1.0] to query exact 3D coordinates and source code lines for any pixel, and run lint_structure to verify 0 spec warnings before completion.`
   );
 
   return lines.join("\n");
@@ -316,7 +352,7 @@ export class MineBuildingMcpServer {
 
   constructor(options: WsBridgeOptions = {}) {
     this.world = createDefaultTerrainWorld([32, 32, 32]);
-    this.assetLoader = new JarAssetLoader();
+    this.assetLoader = defaultJarAssetLoader;
     this.wsBridge = new WsBridge(options);
 
     this.server = new Server(
@@ -327,6 +363,7 @@ export class MineBuildingMcpServer {
       {
         capabilities: {
           tools: {},
+          prompts: {},
         },
       }
     );
@@ -347,10 +384,14 @@ export class MineBuildingMcpServer {
     };
   }
 
-  private async syncCurrentWorldToViewer(): Promise<void> {
+  private async syncCurrentWorldToViewer(): Promise<{
+    textures: Record<string, string>;
+    blockModels: Record<string, import("../types/shared.js").CompiledBlockDefinition>;
+  }> {
+    const { textures, blockModels } = this.collectWorldAssets();
+    this.world.resolveBlockStates(blockModels);
     const voxels = this.world.getAllVoxels();
     const traces = this.world.getTracesObject();
-    const { textures, blockModels } = this.collectWorldAssets();
     await this.wsBridge.syncWorld({
       voxels,
       size: [...this.world.size],
@@ -358,6 +399,7 @@ export class MineBuildingMcpServer {
       textures,
       blockModels,
     });
+    return { textures, blockModels };
   }
 
   private async maybeAutoOpenViewer(): Promise<void> {
@@ -420,14 +462,15 @@ export class MineBuildingMcpServer {
     const resetBeforeRun = args.resetBeforeRun !== false;
 
     const execResult = executeBuildScript(this.world, args.jsCode, resetBeforeRun);
-    await this.syncCurrentWorldToViewer();
+    const { blockModels } = await this.syncCurrentWorldToViewer();
+    const evaluation = this.world.evaluateStructure(blockModels);
     await this.maybeAutoOpenViewer();
     const images = await this.wsBridge.renderViews(resolution);
 
     const reportText = formatBuildReport(
       execResult.opCount,
       execResult.traces,
-      execResult.evaluation,
+      evaluation,
       this.world,
       resolution,
       this.wsBridge.getViteUrl()
@@ -506,9 +549,10 @@ export class MineBuildingMcpServer {
     if (this.wsBridge.getConnectedClientCount() > 0) {
       await this.syncCurrentWorldToViewer();
     } else if (!this.wsBridge.hasSyncedWorld()) {
+      const { textures, blockModels } = this.collectWorldAssets();
+      this.world.resolveBlockStates(blockModels);
       const voxels = this.world.getAllVoxels();
       const traces = this.world.getTracesObject();
-      const { textures, blockModels } = this.collectWorldAssets();
       this.wsBridge.prepareWorldPayload({
         voxels,
         size: [...this.world.size],
@@ -703,7 +747,12 @@ export class MineBuildingMcpServer {
 
     const resolvedPath = path.resolve(args.outputPath);
     await fs.mkdir(path.dirname(resolvedPath), { recursive: true });
-    await saveStructureNbt(this.world, resolvedPath);
+    const uniqueNames = Array.from(
+      new Set(Array.from(this.world.voxels.values(), (v) => v.name))
+    );
+    const blockModels = this.assetLoader.getBlockModelsForBlocks(uniqueNames);
+    this.world.resolveBlockStates(blockModels);
+    await saveStructureNbt(this.world, resolvedPath, blockModels);
 
     const totalVoxels = this.world.voxels.size;
     let buildVoxels = 0;
@@ -737,7 +786,94 @@ export class MineBuildingMcpServer {
     };
   }
 
+  public async handleLintStructure(): Promise<CallToolResult> {
+    const { blockModels } = this.collectWorldAssets();
+    this.world.resolveBlockStates(blockModels);
+    const lintReport = this.world.lintStructure(blockModels);
+    const evaluation = this.world.evaluateStructure(blockModels);
+
+    const payload = {
+      valid: lintReport.valid && evaluation.valid,
+      lintValid: lintReport.valid,
+      structuralValid: evaluation.valid,
+      issueCount: lintReport.issueCount,
+      countsByType: lintReport.countsByType,
+      issues: lintReport.issues,
+      floatingBlocksCount: evaluation.floatingBlocks.length,
+      floatingBlocks: evaluation.floatingBlocks,
+    };
+
+    const lines: string[] = [
+      "=== MineBuildingMCP Vanilla Building Linter Report ===",
+      lintReport.summaryText,
+    ];
+    if (evaluation.warnings.length > 0) {
+      lines.push("");
+      lines.push("--- Structural Warnings ---");
+      for (const w of evaluation.warnings) {
+        lines.push(`- [!] ${w}`);
+      }
+    }
+    lines.push("");
+    lines.push(`JSON Details:\n${JSON.stringify(payload, null, 2)}`);
+
+    return {
+      content: [
+        {
+          type: "text",
+          text: lines.join("\n"),
+        },
+      ],
+    };
+  }
+
   private registerHandlers(): void {
+    this.server.setRequestHandler(ListPromptsRequestSchema, async () => {
+      return {
+        prompts: [
+          {
+            name: "minecraft_building_workflow",
+            description:
+              "Standard Minecraft building workflow guide: (1) Pre-Design Minecraft Idiom Research via web search (roof pitch, wall depth, block palette mixing, chain/lantern/fence joint techniques), (2) DSL construction, and (3) Vanilla Building Linter (lint_structure) & visual pixel-picker verification loop.",
+            arguments: [
+              {
+                name: "theme",
+                description:
+                  "Architectural theme or motif to research and build (e.g. 'Medieval Cliffside Monastery', 'Gothic Cathedral', 'Japanese Castle', 'Suspension Bridge').",
+                required: false,
+              },
+            ],
+          },
+        ],
+      };
+    });
+
+    this.server.setRequestHandler(
+      GetPromptRequestSchema,
+      async (request): Promise<GetPromptResult> => {
+        if (request.params.name !== "minecraft_building_workflow") {
+          throw new Error(`Unknown prompt: ${request.params.name}`);
+        }
+        const theme =
+          typeof request.params.arguments?.theme === "string"
+            ? request.params.arguments.theme
+            : undefined;
+        return {
+          description:
+            "Pre-design Minecraft idiom research & post-build vanilla linter verification workflow",
+          messages: [
+            {
+              role: "user",
+              content: {
+                type: "text",
+                text: buildArchitecturalWorkflowPrompt(theme),
+              },
+            },
+          ],
+        };
+      }
+    );
+
     this.server.setRequestHandler(ListToolsRequestSchema, async () => {
       return {
         tools: [
@@ -760,7 +896,7 @@ export class MineBuildingMcpServer {
           {
             name: "run_build_script",
             description:
-              "Execute JavaScript building DSL code (setBlock, fillBox, clearArea, placeFoundation, buildWall, buildPitchedRoof, line, placeDoor, placeLighting, placeBed, placeTable, placeChair, furnishRoom, detectRooms, getRoomById, getSurfaceY, getDistanceToGround), evaluate floating blocks, sync to the 3D viewer, and return 4 orthographic PNG renders (NE, SE, SW, NW) with an operation trace table.",
+              "Execute JavaScript building DSL code (setBlock, fillBox, clearArea, placeFoundation, buildWall, buildPitchedRoof, line, placeDoor, placeLighting, placeBed, placeTable, placeChair, furnishRoom, detectRooms, getRoomById, getSurfaceY, getDistanceToGround), auto-resolve neighbor block states, run the Vanilla Building Linter (axis_mismatch_junction, missing_support) & floating-block check, sync to the 3D viewer, and return 4 orthographic PNG renders (NE, SE, SW, NW) with an operation trace table. WORKFLOW GUIDELINE: (1) Before writing jsCode for a new architectural theme, research Minecraft-specific building idioms for that theme (roof pitch ratios, 2-layer wall depth/framing, block palette mixing, and vanilla chain/lantern/fence joint techniques) via web search so you avoid real-world physics assumptions that break in Minecraft (such as T-joining horizontal and vertical chains without a joint block). (2) After building, verify both the rendered views and the Vanilla Building Linter report (or call lint_structure + inspect_pixel) and fix every traced DSL line warning before finishing.",
             inputSchema: {
               type: "object",
               properties: {
@@ -783,6 +919,15 @@ export class MineBuildingMcpServer {
                 },
               },
               required: ["jsCode"],
+            },
+          },
+          {
+            name: "lint_structure",
+            description:
+              "Run the static Vanilla Building Linter on the current VoxelWorld to detect Minecraft block-specification mismatches: (1) 'axis_mismatch_junction' where slender single-axis blocks like chains adjoin with different axes (T-junction / L-junction breaks that require a fence, wall, grindstone, hopper, or full block at the intersection), and (2) 'missing_support' where wall-clinging blocks (vine, glow_lichen), hanging/standing blocks (lanterns with hanging=true/false), or mounted blocks lack a valid supporting neighbor. Returns each issue's type, 3D coordinates (x, y, z), traced DSL line number & codeSnippet, and an actionable fix hint.",
+            inputSchema: {
+              type: "object",
+              properties: {},
             },
           },
           {
@@ -998,6 +1143,9 @@ export class MineBuildingMcpServer {
                   ? Boolean(args.resetBeforeRun)
                   : undefined,
             });
+
+          case "lint_structure":
+            return await this.handleLintStructure();
 
           case "render_camera":
             return await this.handleRenderCamera(

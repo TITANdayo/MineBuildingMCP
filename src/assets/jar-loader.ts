@@ -17,6 +17,8 @@ import type {
 const BLOCK_TEXTURE_PREFIX = "assets/minecraft/textures/block/";
 const BLOCK_MODEL_PREFIX = "assets/minecraft/models/block/";
 const BLOCKSTATE_PREFIX = "assets/minecraft/blockstates/";
+const BLOCK_TAG_PREFIX_MODERN = "data/minecraft/tags/block/";
+const BLOCK_TAG_PREFIX_LEGACY = "data/minecraft/tags/blocks/";
 
 const ALL_FACE_DIRECTIONS: McFaceDirection[] = [
   "down",
@@ -57,6 +59,14 @@ function normalizeTextureRefName(texRef: string): string {
     .toLowerCase()
     .replace(/^minecraft:/, "")
     .replace(/^block\//, "");
+}
+
+function normalizeTagRefName(tagRef: string): string {
+  return tagRef
+    .trim()
+    .toLowerCase()
+    .replace(/^#/, "")
+    .replace(/^minecraft:/, "");
 }
 
 /**
@@ -642,7 +652,12 @@ interface RawElementJson {
     rescale?: boolean;
   };
   shade?: boolean;
+  shade_direction_override?: string;
   faces: Record<string, RawFaceJson>;
+}
+
+interface RawBlockTagJson {
+  values?: Array<string | { id?: string; required?: boolean }>;
 }
 
 interface RawBlockModelJson {
@@ -688,12 +703,15 @@ export class JarAssetLoader {
   private jarTextureEntries: Map<string, AdmZip.IZipEntry> = new Map();
   private jarBlockstateEntries: Map<string, AdmZip.IZipEntry> = new Map();
   private jarModelEntries: Map<string, AdmZip.IZipEntry> = new Map();
+  private jarBlockTagEntries: Map<string, AdmZip.IZipEntry> = new Map();
 
   private modelJsonCache: Map<string, RawBlockModelJson | null> = new Map();
   private blockstateJsonCache: Map<string, RawBlockstateJson | null> = new Map();
   private resolvedModelCache: Map<string, ResolvedModelInfo> = new Map();
   private textureAssetCache: Map<string, ResolvedTextureAsset> = new Map();
   private blockDefCache: Map<string, CompiledBlockDefinition> = new Map();
+  private resolvedTagMembersCache: Map<string, Set<string>> = new Map();
+  private blockTagsIndex: Map<string, string[]> | null = null;
   private initialized = false;
 
   constructor(customJarPath?: string) {
@@ -715,11 +733,14 @@ export class JarAssetLoader {
     this.jarTextureEntries.clear();
     this.jarBlockstateEntries.clear();
     this.jarModelEntries.clear();
+    this.jarBlockTagEntries.clear();
     this.modelJsonCache.clear();
     this.blockstateJsonCache.clear();
     this.resolvedModelCache.clear();
     this.textureAssetCache.clear();
     this.blockDefCache.clear();
+    this.resolvedTagMembersCache.clear();
+    this.blockTagsIndex = null;
 
     if (!candidatePath || !fs.existsSync(candidatePath)) {
       return;
@@ -740,6 +761,14 @@ export class JarAssetLoader {
         } else if (name.startsWith(BLOCK_MODEL_PREFIX) && name.endsWith(".json")) {
           const shortKey = name.slice(BLOCK_MODEL_PREFIX.length, -".json".length);
           this.jarModelEntries.set(shortKey, entry);
+        } else if (name.startsWith(BLOCK_TAG_PREFIX_MODERN) && name.endsWith(".json")) {
+          const shortKey = name.slice(BLOCK_TAG_PREFIX_MODERN.length, -".json".length);
+          this.jarBlockTagEntries.set(shortKey, entry);
+        } else if (name.startsWith(BLOCK_TAG_PREFIX_LEGACY) && name.endsWith(".json")) {
+          const shortKey = name.slice(BLOCK_TAG_PREFIX_LEGACY.length, -".json".length);
+          if (!this.jarBlockTagEntries.has(shortKey)) {
+            this.jarBlockTagEntries.set(shortKey, entry);
+          }
         }
       }
       this.zip = zip;
@@ -750,6 +779,7 @@ export class JarAssetLoader {
       this.jarTextureEntries.clear();
       this.jarBlockstateEntries.clear();
       this.jarModelEntries.clear();
+      this.jarBlockTagEntries.clear();
     }
   }
 
@@ -759,6 +789,31 @@ export class JarAssetLoader {
   public getJarPath(): string | null {
     this.ensureInitialized();
     return this.jarPath;
+  }
+
+  private resolveAliasViaTags(cleanName: string): string {
+    if (this.jarBlockstateEntries.has(cleanName)) {
+      return cleanName;
+    }
+    const pluralTag = `${cleanName}s`;
+    if (this.jarBlockTagEntries.has(pluralTag)) {
+      const members = this.resolveBlockTag(pluralTag);
+      const preferred = `iron_${cleanName}`;
+      if (members.has(preferred) && this.jarBlockstateEntries.has(preferred)) {
+        return preferred;
+      }
+      for (const m of members) {
+        if (m.endsWith(`_${cleanName}`) && this.jarBlockstateEntries.has(m)) {
+          return m;
+        }
+      }
+      for (const m of members) {
+        if (this.jarBlockstateEntries.has(m)) {
+          return m;
+        }
+      }
+    }
+    return cleanName;
   }
 
   private loadRawBlockstateJson(blockName: string): RawBlockstateJson | null {
@@ -772,7 +827,8 @@ export class JarAssetLoader {
       return null;
     }
 
-    const entry = this.jarBlockstateEntries.get(clean);
+    const canonical = this.resolveAliasViaTags(clean);
+    const entry = this.jarBlockstateEntries.get(canonical);
     if (!entry) {
       this.blockstateJsonCache.set(clean, null);
       return null;
@@ -813,6 +869,101 @@ export class JarAssetLoader {
       this.modelJsonCache.set(clean, null);
       return null;
     }
+  }
+
+  private resolveBlockTag(tagName: string, visited = new Set<string>()): Set<string> {
+    const clean = normalizeTagRefName(tagName);
+    const cached = this.resolvedTagMembersCache.get(clean);
+    if (cached) {
+      return cached;
+    }
+    if (visited.has(clean) || !this.zip) {
+      return new Set();
+    }
+    visited.add(clean);
+
+    const entry = this.jarBlockTagEntries.get(clean);
+    const members = new Set<string>();
+    if (!entry) {
+      this.resolvedTagMembersCache.set(clean, members);
+      return members;
+    }
+
+    try {
+      const parsed = JSON.parse(this.zip.readAsText(entry)) as RawBlockTagJson;
+      for (const rawVal of parsed.values ?? []) {
+        const id =
+          typeof rawVal === "string"
+            ? rawVal
+            : typeof rawVal?.id === "string"
+              ? rawVal.id
+              : null;
+        if (!id) continue;
+        const trimmed = id.trim();
+        if (trimmed.startsWith("#")) {
+          for (const sub of this.resolveBlockTag(trimmed, visited)) {
+            members.add(sub);
+          }
+        } else {
+          members.add(normalizeBlockName(trimmed));
+        }
+      }
+    } catch {
+      // Ignore malformed tag files
+    }
+
+    this.resolvedTagMembersCache.set(clean, members);
+    return members;
+  }
+
+  private ensureBlockTagsIndex(): Map<string, string[]> {
+    this.ensureInitialized();
+    if (this.blockTagsIndex) {
+      return this.blockTagsIndex;
+    }
+
+    const index = new Map<string, Set<string>>();
+    for (const tagKey of this.jarBlockTagEntries.keys()) {
+      const members = this.resolveBlockTag(tagKey);
+      for (const blockName of members) {
+        let set = index.get(blockName);
+        if (!set) {
+          set = new Set();
+          index.set(blockName, set);
+        }
+        set.add(tagKey);
+      }
+    }
+
+    const finalized = new Map<string, string[]>();
+    for (const [blockName, tagSet] of index.entries()) {
+      finalized.set(blockName, Array.from(tagSet).sort());
+    }
+    this.blockTagsIndex = finalized;
+    return finalized;
+  }
+
+  /**
+   * Returns all Minecraft block tags (e.g. `["fences", "wooden_fences"]`) that include `blockName`,
+   * loaded dynamically from `data/minecraft/tags/block(s)/*.json` in the `.jar`.
+   */
+  public getBlockTags(blockName: string): string[] {
+    const clean = normalizeBlockName(blockName);
+    const index = this.ensureBlockTagsIndex();
+    const direct = index.get(clean);
+    if (direct && direct.length > 0) {
+      return direct;
+    }
+    const canonical = this.resolveAliasViaTags(clean);
+    return index.get(canonical) ?? [];
+  }
+
+  /**
+   * Returns all normalized block names belonging to `tagName` (e.g. `"fences"`, `"#minecraft:walls"`).
+   */
+  public getBlockTagMembers(tagName: string): string[] {
+    this.ensureInitialized();
+    return Array.from(this.resolveBlockTag(tagName)).sort();
   }
 
   private normalizeFaceDirection(raw?: string): McFaceDirection | undefined {
@@ -1009,11 +1160,18 @@ export class JarAssetLoader {
         };
       }
 
+      const effectiveShade =
+        el.shade === false || el.shade_direction_override === "up"
+          ? false
+          : typeof el.shade === "boolean"
+            ? el.shade
+            : undefined;
+
       resolvedElements.push({
         from: [el.from[0], el.from[1], el.from[2]],
         to: [el.to[0], el.to[1], el.to[2]],
         ...(rotation ? { rotation } : {}),
-        ...(typeof el.shade === "boolean" ? { shade: el.shade } : {}),
+        ...(typeof effectiveShade === "boolean" ? { shade: effectiveShade } : {}),
         faces,
       });
     }
@@ -1196,6 +1354,7 @@ export class JarAssetLoader {
       return cached;
     }
 
+    const tags = this.getBlockTags(normalized);
     const rawState = this.loadRawBlockstateJson(normalized);
     if (!rawState || (!rawState.variants && !rawState.multipart)) {
       const modelInfo = this.resolveBlockModel(normalized);
@@ -1209,6 +1368,7 @@ export class JarAssetLoader {
       }
       const def: CompiledBlockDefinition = {
         blockName: normalized,
+        ...(tags.length > 0 ? { tags } : {}),
         variants: { "": [{ model: normalized }] },
         models: { [normalized]: modelInfo.elements },
         isFullOpaqueCube:
@@ -1286,6 +1446,7 @@ export class JarAssetLoader {
 
     const def: CompiledBlockDefinition = {
       blockName: normalized,
+      ...(tags.length > 0 ? { tags } : {}),
       ...(variants ? { variants } : {}),
       ...(multipart ? { multipart } : {}),
       models,

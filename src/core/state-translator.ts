@@ -221,6 +221,10 @@ export function javaToBedrockState(
         states["upside_down_bit"] = { type: "byte", value: bit };
         continue;
       }
+      if (key === "shape") {
+        // Bedrock computes stair corner shapes automatically from adjacent stairs
+        continue;
+      }
     }
 
     // 2. Slabs (_slab)

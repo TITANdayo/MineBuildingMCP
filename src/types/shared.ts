@@ -48,6 +48,7 @@ export interface MultipartCase {
 
 export interface CompiledBlockDefinition {
   blockName: string;
+  tags?: string[];
   variants?: Record<string, AppliedModelRef[]>;
   multipart?: MultipartCase[];
   models: Record<string, ResolvedModelElement[]>;
@@ -170,7 +171,35 @@ export interface TerrainSummary {
   textSummary: string;
 }
 
-// 構造評価結果（浮きブロック等の静的チェック）
+// バニラ建築整合性リンター（仕様不整合・支持体欠損等の静的検査結果）
+export type BuildLintIssueType =
+  | "axis_mismatch_junction"
+  | "missing_support";
+
+export interface BuildLintIssue {
+  type: BuildLintIssueType;
+  coord: { x: number; y: number; z: number };
+  block: string;
+  state?: BlockState;
+  opId: number;
+  line?: number;
+  codeSnippet?: string;
+  trace?: TraceRecord;
+  message: string;
+  hint: string;
+  relatedCoord?: { x: number; y: number; z: number };
+  relatedBlock?: string;
+}
+
+export interface BuildLintReport {
+  valid: boolean;
+  issueCount: number;
+  countsByType: Record<BuildLintIssueType, number>;
+  issues: BuildLintIssue[];
+  summaryText: string;
+}
+
+// 構造評価結果（浮きブロック等の静的チェック＋バニラ建築整合性リンター結果）
 export interface StructureEvaluation {
   valid: boolean;
   totalBuildBlocks: number;
@@ -186,6 +215,7 @@ export interface StructureEvaluation {
   floatingClustersCount: number;
   outOfBoundsCount: number;
   warnings: string[];
+  lintIssues?: BuildLintIssue[];
 }
 
 // --- 追加機能1：室内空間（Room）自動検出・動線チェック・内装レンダリング用の型定義 ---
