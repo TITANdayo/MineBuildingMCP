@@ -675,8 +675,12 @@ export class VoxelWorld {
 
       for (const [opId, group] of byOpId.entries()) {
         const sample = group[0];
-        const minDist = Math.min(...group.map((g) => g.distanceToGround));
-        const maxDist = Math.max(...group.map((g) => g.distanceToGround));
+        let minDist = Infinity;
+        let maxDist = -Infinity;
+        for (const g of group) {
+          if (g.distanceToGround < minDist) minDist = g.distanceToGround;
+          if (g.distanceToGround > maxDist) maxDist = g.distanceToGround;
+        }
         const traceInfo = sample.trace
           ? `Line ${sample.trace.line}: \`${sample.trace.codeSnippet}\``
           : `opId=${opId}`;
@@ -1595,29 +1599,39 @@ export class VoxelWorld {
     }
 
     // Filter out tiny crevices (< 4 floor columns or < 4 cells), while allowing 1-wide corridors >= 4 blocks long
-    const validComponents = rawComponents.filter((comp) => {
-      const uniqueCols = new Set(comp.map((c) => `${c.x},${c.z}`));
-      const minX = Math.min(...comp.map((c) => c.x));
-      const maxX = Math.max(...comp.map((c) => c.x));
-      const minZ = Math.min(...comp.map((c) => c.z));
-      const maxZ = Math.max(...comp.map((c) => c.z));
-      return (
-        uniqueCols.size >= 4 &&
-        comp.length >= 4 &&
-        (maxX - minX >= 1 || maxZ - minZ >= 1)
-      );
-    });
+    const validComponentsWithBounds: Array<{
+      comp: typeof rawComponents[number];
+      minX: number;
+      minZ: number;
+    }> = [];
+    for (const comp of rawComponents) {
+      if (comp.length < 4) continue;
+      const uniqueCols = new Set<string>();
+      let minX = Infinity;
+      let maxX = -Infinity;
+      let minZ = Infinity;
+      let maxZ = -Infinity;
+      for (const c of comp) {
+        uniqueCols.add(`${c.x},${c.z}`);
+        if (c.x < minX) minX = c.x;
+        if (c.x > maxX) maxX = c.x;
+        if (c.z < minZ) minZ = c.z;
+        if (c.z > maxZ) maxZ = c.z;
+      }
+      if (uniqueCols.size >= 4 && (maxX - minX >= 1 || maxZ - minZ >= 1)) {
+        validComponentsWithBounds.push({ comp, minX, minZ });
+      }
+    }
 
     // Sort rooms deterministically: floorY ascending, then minZ, then minX
-    validComponents.sort((a, b) => {
-      if (a[0].floorY !== b[0].floorY) return a[0].floorY - b[0].floorY;
-      const minZa = Math.min(...a.map((c) => c.z));
-      const minZb = Math.min(...b.map((c) => c.z));
-      if (minZa !== minZb) return minZa - minZb;
-      const minXa = Math.min(...a.map((c) => c.x));
-      const minXb = Math.min(...b.map((c) => c.x));
-      return minXa - minXb;
+    validComponentsWithBounds.sort((a, b) => {
+      if (a.comp[0].floorY !== b.comp[0].floorY) {
+        return a.comp[0].floorY - b.comp[0].floorY;
+      }
+      if (a.minZ !== b.minZ) return a.minZ - b.minZ;
+      return a.minX - b.minX;
     });
+    const validComponents = validComponentsWithBounds.map((entry) => entry.comp);
 
     // Collect all lower door blocks in the world for door analysis
     const allDoors: Array<{ x: number; y: number; z: number; voxel: VoxelData }> =

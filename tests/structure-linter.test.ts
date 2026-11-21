@@ -11,6 +11,7 @@ import {
 import { VoxelWorld } from "../src/core/voxel-world.js";
 import {
   buildArchitecturalWorkflowPrompt,
+  MAX_LINT_FLOATING_BLOCKS,
   MineBuildingMcpServer,
 } from "../src/mcp/server.js";
 
@@ -310,6 +311,83 @@ describe("Vanilla Building Linter (Minecraft Spec Consistency Check) & Pre-Desig
       const lintRes2 = await mcpServer.handleLintStructure();
       const text2 = (lintRes2.content[0] as { type: "text"; text: string }).text;
       expect(text2).toContain("PASSED (0 spec/support issues detected)");
+    } finally {
+      await mcpServer.close();
+    }
+  });
+
+  it("5. evaluateStructure() handles >= 150,000 floating blocks sharing a single opId without V8 stack overflow", () => {
+    const world = new VoxelWorld([256, 256, 256]);
+    for (let x = 10; x < 110; x++) {
+      for (let y = 10; y <= 24; y++) {
+        for (let z = 10; z < 110; z++) {
+          world.setVoxel(x, y, z, "minecraft:stone", undefined, false, 1);
+        }
+      }
+    }
+
+    const evaluation = world.evaluateStructure();
+    expect(evaluation.valid).toBe(false);
+    expect(evaluation.floatingBlocks.length).toBe(150_000);
+    expect(evaluation.floatingClustersCount).toBe(1);
+    expect(evaluation.warnings.length).toBe(1);
+    expect(evaluation.warnings[0]).toContain("150000 block(s)");
+    expect(evaluation.warnings[0]).toContain("distanceToGround=0..10");
+  });
+
+  it("6. handleLintStructure() caps serialized floatingBlocks to prevent JSON-RPC overflow while preserving small counts", async () => {
+    const mcpServer = new MineBuildingMcpServer({
+      wsPort: 0,
+      vitePort: 0,
+      openViewer: false,
+    });
+    try {
+      // Small-count case (<= MAX_LINT_FLOATING_BLOCKS)
+      for (let x = 5; x < 10; x++) {
+        mcpServer.world.setVoxel(x, 10, 5, "minecraft:stone", undefined, false, 1);
+      }
+      const smallRes = await mcpServer.handleLintStructure();
+      expect(smallRes.isError).toBeFalsy();
+      const smallText = (smallRes.content[0] as { type: "text"; text: string }).text;
+      expect(smallText).toContain("Floating Blocks: 5 across 1 cluster(s)");
+      const smallMarker = "JSON Details:\n";
+      const smallJson = JSON.parse(
+        smallText.slice(smallText.indexOf(smallMarker) + smallMarker.length)
+      );
+      expect(smallJson.floatingBlocksCount).toBe(5);
+      expect(smallJson.floatingClustersCount).toBe(1);
+      expect(smallJson.floatingBlocks.length).toBe(5);
+      expect(smallJson.floatingBlocksTruncatedCount).toBe(0);
+      expect(smallJson.issuesTruncatedCount).toBe(0);
+
+      // Large-count case (50,000 floating blocks)
+      mcpServer.world = new VoxelWorld([64, 64, 64]);
+      for (let x = 5; x < 55; x++) {
+        for (let y = 10; y <= 29; y++) {
+          for (let z = 5; z < 55; z++) {
+            mcpServer.world.setVoxel(x, y, z, "minecraft:stone", undefined, false, 1);
+          }
+        }
+      }
+
+      const largeRes = await mcpServer.handleLintStructure();
+      expect(largeRes.isError).toBeFalsy();
+      const largeText = (largeRes.content[0] as { type: "text"; text: string }).text;
+      expect(largeText.length).toBeLessThan(100_000);
+      expect(largeText).toContain(
+        `Floating Blocks: 50000 across 1 cluster(s) (showing first ${MAX_LINT_FLOATING_BLOCKS}, 49900 omitted)`
+      );
+
+      const largeJson = JSON.parse(
+        largeText.slice(largeText.indexOf(smallMarker) + smallMarker.length)
+      );
+      expect(largeJson.valid).toBe(false);
+      expect(largeJson.lintValid).toBe(true);
+      expect(largeJson.structuralValid).toBe(false);
+      expect(largeJson.floatingBlocksCount).toBe(50_000);
+      expect(largeJson.floatingClustersCount).toBeGreaterThanOrEqual(1);
+      expect(largeJson.floatingBlocks.length).toBe(MAX_LINT_FLOATING_BLOCKS);
+      expect(largeJson.floatingBlocksTruncatedCount).toBe(50_000 - MAX_LINT_FLOATING_BLOCKS);
     } finally {
       await mcpServer.close();
     }

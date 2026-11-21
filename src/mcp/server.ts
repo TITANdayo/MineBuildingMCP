@@ -45,6 +45,9 @@ import type {
 } from "../types/shared.js";
 import { WsBridge, type WsBridgeOptions } from "./ws-bridge.js";
 
+export const MAX_LINT_FLOATING_BLOCKS = 100;
+export const MAX_LINT_ISSUES = 200;
+
 const VIEW_DIRECTIONS: ViewDirection[] = ["NE", "SE", "SW", "NW"];
 const CARDINAL_DIRECTIONS: CardinalDirection[] = ["N", "S", "E", "W"];
 const INSPECT_VIEWS: InspectViewId[] = ["NE", "SE", "SW", "NW", "custom"];
@@ -792,21 +795,52 @@ export class MineBuildingMcpServer {
     const lintReport = this.world.lintStructure(blockModels);
     const evaluation = this.world.evaluateStructure(blockModels);
 
+    const floatingBlocksSample = evaluation.floatingBlocks.slice(
+      0,
+      MAX_LINT_FLOATING_BLOCKS
+    );
+    const floatingBlocksTruncatedCount = Math.max(
+      0,
+      evaluation.floatingBlocks.length - floatingBlocksSample.length
+    );
+    const issuesSample = lintReport.issues.slice(0, MAX_LINT_ISSUES);
+    const issuesTruncatedCount = Math.max(
+      0,
+      lintReport.issues.length - issuesSample.length
+    );
+
     const payload = {
       valid: lintReport.valid && evaluation.valid,
       lintValid: lintReport.valid,
       structuralValid: evaluation.valid,
       issueCount: lintReport.issueCount,
+      issuesTruncatedCount,
       countsByType: lintReport.countsByType,
-      issues: lintReport.issues,
+      issues: issuesSample,
       floatingBlocksCount: evaluation.floatingBlocks.length,
-      floatingBlocks: evaluation.floatingBlocks,
+      floatingClustersCount: evaluation.floatingClustersCount,
+      floatingBlocksTruncatedCount,
+      floatingBlocks: floatingBlocksSample,
     };
 
     const lines: string[] = [
       "=== MineBuildingMCP Vanilla Building Linter Report ===",
       lintReport.summaryText,
     ];
+    if (evaluation.floatingBlocks.length > 0) {
+      const truncNote =
+        floatingBlocksTruncatedCount > 0
+          ? ` (showing first ${floatingBlocksSample.length}, ${floatingBlocksTruncatedCount} omitted)`
+          : "";
+      lines.push(
+        `Floating Blocks: ${evaluation.floatingBlocks.length} across ${evaluation.floatingClustersCount} cluster(s)${truncNote}`
+      );
+    }
+    if (issuesTruncatedCount > 0) {
+      lines.push(
+        `Lint Issues JSON: showing first ${issuesSample.length} of ${lintReport.issueCount} (${issuesTruncatedCount} omitted)`
+      );
+    }
     if (evaluation.warnings.length > 0) {
       lines.push("");
       lines.push("--- Structural Warnings ---");
