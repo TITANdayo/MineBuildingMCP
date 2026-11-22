@@ -2,6 +2,7 @@
   "name": "mine-building-mcp",
   "version": "1.1.0",
   "description": "MineBuildingMCP: AI-specialized lightweight Minecraft building editor & MCP server with Three.js 4-view offscreen ID picker, interior cutaway renderer, and Java/Bedrock structure support",
+  "license": "Apache-2.0",
   "type": "module",
   "bin": {
     "mine-building-mcp": "./dist/mcp/server.js"
