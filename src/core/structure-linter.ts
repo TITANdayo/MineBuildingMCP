@@ -4,45 +4,99 @@ import type {
   BuildLintIssueType,
   BuildLintReport,
   CompiledBlockDefinition,
+  ResolvedModelElement,
   TraceRecord,
   VoxelData,
 } from "../types/shared.js";
+import { coordKey } from "./block-name.js";
 import {
   ALL_DIRS,
-  CARDINAL_DIRS,
   classifyBlockConnectionKind,
-  collectMultipartPropValues,
   collectVariantPropValues,
   DIR_VECTORS,
   getBlockDef,
   getDefaultPropValue,
   getExistingBlockDef,
+  getMultifaceSupportedDirs,
   hasTag,
   hasVariantProp,
+  horizDelta,
   isInstanceFullOpaqueCube,
   normalizeShortBlockName,
   resolveWorldBlockStates,
 } from "./block-state-resolver.js";
 
-function horizDelta(dir: string): [number, number] {
-  switch (dir.toLowerCase()) {
-    case "north":
-      return [0, -1];
-    case "south":
-      return [0, 1];
-    case "west":
-      return [-1, 0];
-    case "east":
-      return [1, 0];
-    default:
-      return [0, -1];
-  }
-}
+const DEFAULT_MAX_SUMMARY_ISSUES = 100;
 
 function isFullCubePillarFallbackName(shortName: string): boolean {
-  return /(^|_)(log|wood|stem|hyphae|pillar|basalt|deepslate|hay_block|bone_block|froglight|portal)$/.test(
+  return /(^|_)(log|wood|stem|hyphae|pillar|basalt|deepslate|hay_block|bone_block|froglight|portal|bamboo_block|muddy_mangrove_roots)$/.test(
     shortName
   );
+}
+
+function isFallbackSlenderChainName(shortName: string): boolean {
+  return shortName === "chain" || shortName.endsWith("_chain");
+}
+
+function isFallbackHangingBlockName(shortName: string): boolean {
+  return (
+    shortName === "lantern" ||
+    (shortName.endsWith("_lantern") &&
+      shortName !== "sea_lantern" &&
+      shortName !== "jack_o_lantern")
+  );
+}
+
+function isFallbackAttachmentBlockName(shortName: string): boolean {
+  return shortName === "bell";
+}
+
+function isFallbackFaceMountedBlockName(shortName: string): boolean {
+  return (
+    shortName === "lever" ||
+    shortName === "grindstone" ||
+    shortName.endsWith("_button")
+  );
+}
+
+function isFallbackWallMountedDirectionalName(shortName: string): boolean {
+  return (
+    shortName === "wall_torch" ||
+    shortName === "ladder" ||
+    shortName === "tripwire_hook" ||
+    shortName.endsWith("_wall_torch") ||
+    shortName.endsWith("_wall_sign") ||
+    shortName.endsWith("_wall_hanging_sign") ||
+    shortName.endsWith("_wall_banner") ||
+    shortName.endsWith("_wall_fan")
+  );
+}
+
+function computeElementsBounds(elements: ResolvedModelElement[]): {
+  minX: number;
+  minY: number;
+  minZ: number;
+  maxX: number;
+  maxY: number;
+  maxZ: number;
+} {
+  let minX = Infinity,
+    minY = Infinity,
+    minZ = Infinity;
+  let maxX = -Infinity,
+    maxY = -Infinity,
+    maxZ = -Infinity;
+
+  for (const el of elements) {
+    minX = Math.min(minX, el.from[0], el.to[0]);
+    minY = Math.min(minY, el.from[1], el.to[1]);
+    minZ = Math.min(minZ, el.from[2], el.to[2]);
+    maxX = Math.max(maxX, el.from[0], el.to[0]);
+    maxY = Math.max(maxY, el.from[1], el.to[1]);
+    maxZ = Math.max(maxZ, el.from[2], el.to[2]);
+  }
+
+  return { minX, minY, minZ, maxX, maxY, maxZ };
 }
 
 /**
@@ -61,23 +115,25 @@ export function isSlenderAxisBlock(
 
   const existingDef = getExistingBlockDef(voxel.name, blockModels);
   const effectiveDef = existingDef ?? def;
+  const hasRealJarDef = Boolean(existingDef && !existingDef.isFallback);
 
-  const hasAxis =
-    hasVariantProp(effectiveDef, "axis") ||
-    (voxel.state?.axis !== undefined &&
-      (!existingDef || !effectiveDef.isFullOpaqueCube));
-
-  if (!hasAxis) {
+  if (!hasRealJarDef) {
+    // Fallback when no compiled JAR model was provided for this block
+    const shortName = normalizeShortBlockName(voxel.name);
+    if (isFallbackSlenderChainName(shortName)) {
+      return true;
+    }
+    if (voxel.state?.axis !== undefined) {
+      return !isFullCubePillarFallbackName(shortName);
+    }
     return false;
   }
 
-  if (!existingDef) {
-    // Fallback when no compiled JAR model was provided for this block
-    const shortName = normalizeShortBlockName(voxel.name);
-    return !isFullCubePillarFallbackName(shortName);
-  }
+  const hasAxis =
+    hasVariantProp(effectiveDef, "axis") ||
+    (voxel.state?.axis !== undefined && !effectiveDef.isFullOpaqueCube);
 
-  if (effectiveDef.isFullOpaqueCube) {
+  if (!hasAxis || effectiveDef.isFullOpaqueCube) {
     return false;
   }
 
@@ -90,23 +146,9 @@ export function isSlenderAxisBlock(
     return true;
   }
 
-  const elements = modelArrays[0];
-  let minX = Infinity,
-    minY = Infinity,
-    minZ = Infinity;
-  let maxX = -Infinity,
-    maxY = -Infinity,
-    maxZ = -Infinity;
-
-  for (const el of elements) {
-    minX = Math.min(minX, el.from[0], el.to[0]);
-    minY = Math.min(minY, el.from[1], el.to[1]);
-    minZ = Math.min(minZ, el.from[2], el.to[2]);
-    maxX = Math.max(maxX, el.from[0], el.to[0]);
-    maxY = Math.max(maxY, el.from[1], el.to[1]);
-    maxZ = Math.max(maxZ, el.from[2], el.to[2]);
-  }
-
+  const { minX, minY, minZ, maxX, maxY, maxZ } = computeElementsBounds(
+    modelArrays[0]
+  );
   const spans = [maxX - minX, maxY - minY, maxZ - minZ].sort((a, b) => a - b);
   return spans[0] <= 10 && spans[1] <= 10;
 }
@@ -116,6 +158,11 @@ export function isSlenderAxisBlock(
  * that only have horizontal `facing` variants and require a backing wall.
  */
 function isWallMountedDirectionalBlock(def: CompiledBlockDefinition): boolean {
+  if (def.isFallback) {
+    return isFallbackWallMountedDirectionalName(
+      normalizeShortBlockName(def.blockName)
+    );
+  }
   if (def.isFullOpaqueCube || !def.variants) return false;
   if (
     hasTag(def, "wall_signs") ||
@@ -152,22 +199,9 @@ function isWallMountedDirectionalBlock(def: CompiledBlockDefinition): boolean {
   );
   if (modelArrays.length === 0) return false;
 
-  const elements = modelArrays[0];
-  let minX = Infinity,
-    minY = Infinity,
-    minZ = Infinity;
-  let maxX = -Infinity,
-    maxY = -Infinity,
-    maxZ = -Infinity;
-
-  for (const el of elements) {
-    minX = Math.min(minX, el.from[0], el.to[0]);
-    minY = Math.min(minY, el.from[1], el.to[1]);
-    minZ = Math.min(minZ, el.from[2], el.to[2]);
-    maxX = Math.max(maxX, el.from[0], el.to[0]);
-    maxY = Math.max(maxY, el.from[1], el.to[1]);
-    maxZ = Math.max(maxZ, el.from[2], el.to[2]);
-  }
+  const { minX, minY, minZ, maxX, maxY, maxZ } = computeElementsBounds(
+    modelArrays[0]
+  );
 
   // Either hovers off the floor & below the ceiling (e.g. wall_torch, wall_sign, tripwire_hook)
   // or is a thin climbable wall sheet (e.g. ladder)
@@ -191,18 +225,24 @@ function isValidRigidSupport(
 }
 
 /**
- * Formats a `BuildLintReport` summary text with line numbers and actionable hints.
+ * Formats a `BuildLintReport` summary text with line numbers and actionable hints,
+ * bounded to `maxItems` entries to prevent unbounded JSON-RPC output on massive structures.
  */
-export function formatLintReportSummary(issues: BuildLintIssue[]): string {
+export function formatLintReportSummary(
+  issues: BuildLintIssue[],
+  maxItems = DEFAULT_MAX_SUMMARY_ISSUES
+): string {
   if (issues.length === 0) {
     return "Vanilla Building Linter: PASSED (0 spec/support issues detected).";
   }
 
+  const limit = Math.max(1, Math.floor(maxItems));
+  const shown = issues.slice(0, limit);
   const lines: string[] = [];
   lines.push(
     `Vanilla Building Linter: ${issues.length} issue(s) detected. Fix the corresponding DSL lines below:`
   );
-  for (const issue of issues) {
+  for (const issue of shown) {
     const stateStr =
       issue.state && Object.keys(issue.state).length > 0
         ? `[${Object.entries(issue.state)
@@ -218,6 +258,11 @@ export function formatLintReportSummary(issues: BuildLintIssue[]): string {
     );
     lines.push(`    Reason: ${issue.message}`);
     lines.push(`    Hint: ${issue.hint}`);
+  }
+  if (issues.length > shown.length) {
+    lines.push(
+      `  ... and ${issues.length - shown.length} more lint issue(s) omitted.`
+    );
   }
   return lines.join("\n");
 }
@@ -236,18 +281,17 @@ export function lintWorldStructure(
   voxels: VoxelData[],
   blockModels?: Record<string, CompiledBlockDefinition>,
   traces?: Map<number, TraceRecord> | Record<number, TraceRecord>,
-  explicitStateKeysMap?: Map<string, Set<string>>
+  explicitStateKeysMap?: Map<string, Set<string>>,
+  preResolvedStates?: Map<string, BlockState>
 ): BuildLintReport {
   const voxelMap = new Map<string, VoxelData>();
   for (const v of voxels) {
-    voxelMap.set(`${v.x},${v.y},${v.z}`, v);
+    voxelMap.set(coordKey(v.x, v.y, v.z), v);
   }
 
-  const resolvedStates = resolveWorldBlockStates(
-    voxels,
-    blockModels,
-    explicitStateKeysMap
-  );
+  const resolvedStates =
+    preResolvedStates ??
+    resolveWorldBlockStates(voxels, blockModels, explicitStateKeysMap);
 
   const getTrace = (opId: number): TraceRecord | undefined => {
     if (!traces || opId <= 0) return undefined;
@@ -257,8 +301,8 @@ export function lintWorldStructure(
     return traces[opId];
   };
 
-  const getEffectiveState = (voxel: VoxelData, def: CompiledBlockDefinition): BlockState => {
-    const key = `${voxel.x},${voxel.y},${voxel.z}`;
+  const getEffectiveState = (voxel: VoxelData): BlockState => {
+    const key = coordKey(voxel.x, voxel.y, voxel.z);
     const resolved = resolvedStates.get(key);
     if (resolved && Object.keys(resolved).length > 0) {
       return resolved;
@@ -282,18 +326,19 @@ export function lintWorldStructure(
   const supportedMultifaceKeys = new Set<string>();
 
   for (const voxel of sortedByYDesc) {
-    const key = `${voxel.x},${voxel.y},${voxel.z}`;
+    const key = coordKey(voxel.x, voxel.y, voxel.z);
     const def = getBlockDef(voxel.name, blockModels);
     const kind = classifyBlockConnectionKind(def);
-    const state = getEffectiveState(voxel, def);
+    const state = getEffectiveState(voxel);
     const trace = getTrace(voxel.opId);
+    const shortName = normalizeShortBlockName(voxel.name);
 
     // -------------------------------------------------------------------------
     // Check 1: Wall-clinging multiface support (top-down Y order)
     // -------------------------------------------------------------------------
     if (kind === "multiface_clinging") {
-      const dirValues = collectMultipartPropValues(def);
-      const supportedDirs = ALL_DIRS.filter((d) => Boolean(dirValues[d]));
+      const supportedDirs = getMultifaceSupportedDirs(def);
+      const supportsUp = supportedDirs.includes("up");
       const activeDirs = supportedDirs.filter((d) => state[d] === "true");
 
       const explicitKeys = explicitStateKeysMap?.get(key);
@@ -309,7 +354,7 @@ export function lintWorldStructure(
 
       const isDirectionBackedBySupport = (dir: (typeof ALL_DIRS)[number]): boolean => {
         const [dx, dy, dz] = DIR_VECTORS[dir];
-        const neighbor = voxelMap.get(`${voxel.x + dx},${voxel.y + dy},${voxel.z + dz}`);
+        const neighbor = voxelMap.get(coordKey(voxel.x + dx, voxel.y + dy, voxel.z + dz));
         if (neighbor) {
           const nDef = getBlockDef(neighbor.name, blockModels);
           if (
@@ -322,18 +367,16 @@ export function lintWorldStructure(
         // Horizontal hanging continuation from a supported same-block directly above
         if (
           (dir === "north" || dir === "south" || dir === "east" || dir === "west") &&
-          Boolean(dirValues.up)
+          supportsUp
         ) {
-          const aboveKey = `${voxel.x},${voxel.y + 1},${voxel.z}`;
+          const aboveKey = coordKey(voxel.x, voxel.y + 1, voxel.z);
           const aboveVoxel = voxelMap.get(aboveKey);
           if (
             aboveVoxel &&
-            normalizeShortBlockName(aboveVoxel.name) ===
-              normalizeShortBlockName(voxel.name) &&
+            normalizeShortBlockName(aboveVoxel.name) === shortName &&
             supportedMultifaceKeys.has(aboveKey)
           ) {
-            const aboveDef = getBlockDef(aboveVoxel.name, blockModels);
-            const aboveState = getEffectiveState(aboveVoxel, aboveDef);
+            const aboveState = getEffectiveState(aboveVoxel);
             if (aboveState[dir] === "true") {
               return true;
             }
@@ -393,12 +436,12 @@ export function lintWorldStructure(
 
       for (const dir of ALL_DIRS) {
         const [dx, dy, dz] = DIR_VECTORS[dir];
-        const neighbor = voxelMap.get(`${voxel.x + dx},${voxel.y + dy},${voxel.z + dz}`);
+        const neighbor = voxelMap.get(coordKey(voxel.x + dx, voxel.y + dy, voxel.z + dz));
         if (!neighbor) continue;
         const nDef = getBlockDef(neighbor.name, blockModels);
         if (!isSlenderAxisBlock(neighbor, nDef, blockModels)) continue;
 
-        const nState = getEffectiveState(neighbor, nDef);
+        const nState = getEffectiveState(neighbor);
         const axisB = (
           nState.axis ??
           neighbor.state?.axis ??
@@ -442,10 +485,12 @@ export function lintWorldStructure(
     // Check 3: `hanging` property blocks (e.g. lanterns, hanging propagules)
     // -------------------------------------------------------------------------
     const existingDef = getExistingBlockDef(voxel.name, blockModels);
+    const hasRealJarDef = Boolean(existingDef && !existingDef.isFallback);
     const hasHangingProp =
       hasVariantProp(def, "hanging") ||
       hasTag(def, "lanterns") ||
-      voxel.state?.hanging !== undefined;
+      voxel.state?.hanging !== undefined ||
+      (!hasRealJarDef && isFallbackHangingBlockName(shortName));
 
     if (hasHangingProp) {
       const hangingVal = (
@@ -457,7 +502,7 @@ export function lintWorldStructure(
 
       if (hangingVal === "true") {
         const aboveCoord = { x: voxel.x, y: voxel.y + 1, z: voxel.z };
-        const aboveKey = `${aboveCoord.x},${aboveCoord.y},${aboveCoord.z}`;
+        const aboveKey = coordKey(aboveCoord.x, aboveCoord.y, aboveCoord.z);
         const aboveVoxel = voxelMap.get(aboveKey);
         const aboveDef = aboveVoxel
           ? getBlockDef(aboveVoxel.name, blockModels)
@@ -469,7 +514,7 @@ export function lintWorldStructure(
           aboveDef &&
           isSlenderAxisBlock(aboveVoxel, aboveDef, blockModels)
         ) {
-          const aboveState = getEffectiveState(aboveVoxel, aboveDef);
+          const aboveState = getEffectiveState(aboveVoxel);
           const aboveAxis = (
             aboveState.axis ??
             aboveVoxel.state?.axis ??
@@ -506,7 +551,7 @@ export function lintWorldStructure(
         }
       } else if (voxel.y > 0) {
         const belowCoord = { x: voxel.x, y: voxel.y - 1, z: voxel.z };
-        const belowKey = `${belowCoord.x},${belowCoord.y},${belowCoord.z}`;
+        const belowKey = coordKey(belowCoord.x, belowCoord.y, belowCoord.z);
         const belowVoxel = voxelMap.get(belowKey);
         const belowDef = belowVoxel
           ? getBlockDef(belowVoxel.name, blockModels)
@@ -535,22 +580,26 @@ export function lintWorldStructure(
     // Check 4: `attachment` / `face` blocks (bell, grindstone, lever, buttons)
     //          and wall-mounted directional thin blocks (wall_torch, wall_sign, ladder)
     // -------------------------------------------------------------------------
-    if (existingDef && hasVariantProp(existingDef, "attachment")) {
+    const hasAttachmentCheck =
+      (hasRealJarDef && existingDef && hasVariantProp(existingDef, "attachment")) ||
+      (!hasRealJarDef && isFallbackAttachmentBlockName(shortName));
+
+    if (hasAttachmentCheck) {
       const att = (
         state.attachment ??
         voxel.state?.attachment ??
-        getDefaultPropValue(existingDef, "attachment") ??
+        getDefaultPropValue(def, "attachment") ??
         "floor"
       ).toLowerCase();
       const facing = (
         state.facing ??
         voxel.state?.facing ??
-        getDefaultPropValue(existingDef, "facing") ??
+        getDefaultPropValue(def, "facing") ??
         "north"
       ).toLowerCase();
 
       if (att === "ceiling") {
-        const aboveVoxel = voxelMap.get(`${voxel.x},${voxel.y + 1},${voxel.z}`);
+        const aboveVoxel = voxelMap.get(coordKey(voxel.x, voxel.y + 1, voxel.z));
         const aboveDef = aboveVoxel
           ? getBlockDef(aboveVoxel.name, blockModels)
           : undefined;
@@ -570,7 +619,7 @@ export function lintWorldStructure(
           });
         }
       } else if (att === "floor" && voxel.y > 0) {
-        const belowVoxel = voxelMap.get(`${voxel.x},${voxel.y - 1},${voxel.z}`);
+        const belowVoxel = voxelMap.get(coordKey(voxel.x, voxel.y - 1, voxel.z));
         const belowDef = belowVoxel
           ? getBlockDef(belowVoxel.name, blockModels)
           : undefined;
@@ -591,8 +640,8 @@ export function lintWorldStructure(
         }
       } else if (att === "single_wall" || att === "double_wall") {
         const [fx, fz] = horizDelta(facing);
-        const n1 = voxelMap.get(`${voxel.x + fx},${voxel.y},${voxel.z + fz}`);
-        const n2 = voxelMap.get(`${voxel.x - fx},${voxel.y},${voxel.z - fz}`);
+        const n1 = voxelMap.get(coordKey(voxel.x + fx, voxel.y, voxel.z + fz));
+        const n2 = voxelMap.get(coordKey(voxel.x - fx, voxel.y, voxel.z - fz));
         const s1 = isValidRigidSupport(
           n1,
           n1 ? getBlockDef(n1.name, blockModels) : undefined
@@ -620,22 +669,26 @@ export function lintWorldStructure(
       continue;
     }
 
-    if (existingDef && hasVariantProp(existingDef, "face")) {
+    const hasFaceCheck =
+      (hasRealJarDef && existingDef && hasVariantProp(existingDef, "face")) ||
+      (!hasRealJarDef && isFallbackFaceMountedBlockName(shortName));
+
+    if (hasFaceCheck) {
       const faceVal = (
         state.face ??
         voxel.state?.face ??
-        getDefaultPropValue(existingDef, "face") ??
+        getDefaultPropValue(def, "face") ??
         "wall"
       ).toLowerCase();
       const facing = (
         state.facing ??
         voxel.state?.facing ??
-        getDefaultPropValue(existingDef, "facing") ??
+        getDefaultPropValue(def, "facing") ??
         "north"
       ).toLowerCase();
 
       if (faceVal === "ceiling") {
-        const aboveVoxel = voxelMap.get(`${voxel.x},${voxel.y + 1},${voxel.z}`);
+        const aboveVoxel = voxelMap.get(coordKey(voxel.x, voxel.y + 1, voxel.z));
         const aboveDef = aboveVoxel
           ? getBlockDef(aboveVoxel.name, blockModels)
           : undefined;
@@ -655,7 +708,7 @@ export function lintWorldStructure(
           });
         }
       } else if (faceVal === "floor" && voxel.y > 0) {
-        const belowVoxel = voxelMap.get(`${voxel.x},${voxel.y - 1},${voxel.z}`);
+        const belowVoxel = voxelMap.get(coordKey(voxel.x, voxel.y - 1, voxel.z));
         const belowDef = belowVoxel
           ? getBlockDef(belowVoxel.name, blockModels)
           : undefined;
@@ -678,8 +731,8 @@ export function lintWorldStructure(
         const [fx, fz] = horizDelta(facing);
         const backCoord = { x: voxel.x - fx, y: voxel.y, z: voxel.z - fz };
         const frontCoord = { x: voxel.x + fx, y: voxel.y, z: voxel.z + fz };
-        const nBack = voxelMap.get(`${backCoord.x},${backCoord.y},${backCoord.z}`);
-        const nFront = voxelMap.get(`${frontCoord.x},${frontCoord.y},${frontCoord.z}`);
+        const nBack = voxelMap.get(coordKey(backCoord.x, backCoord.y, backCoord.z));
+        const nFront = voxelMap.get(coordKey(frontCoord.x, frontCoord.y, frontCoord.z));
         const sBack = isValidRigidSupport(
           nBack,
           nBack ? getBlockDef(nBack.name, blockModels) : undefined
@@ -707,16 +760,16 @@ export function lintWorldStructure(
       continue;
     }
 
-    if (existingDef && isWallMountedDirectionalBlock(existingDef)) {
+    if (isWallMountedDirectionalBlock(def)) {
       const facing = (
         state.facing ??
         voxel.state?.facing ??
-        getDefaultPropValue(existingDef, "facing") ??
+        getDefaultPropValue(def, "facing") ??
         "north"
       ).toLowerCase();
       const [fx, fz] = horizDelta(facing);
       const backCoord = { x: voxel.x - fx, y: voxel.y, z: voxel.z - fz };
-      const backVoxel = voxelMap.get(`${backCoord.x},${backCoord.y},${backCoord.z}`);
+      const backVoxel = voxelMap.get(coordKey(backCoord.x, backCoord.y, backCoord.z));
       const backDef = backVoxel
         ? getBlockDef(backVoxel.name, blockModels)
         : undefined;

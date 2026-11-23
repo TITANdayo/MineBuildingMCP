@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import type { IncomingMessage } from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { chromium, type Browser, type Page } from "playwright";
+import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
 import { createServer, type Logger, type ViteDevServer } from "vite";
 import { WebSocket, WebSocketServer } from "ws";
 import type {
@@ -130,6 +130,7 @@ export class WsBridge {
   private wss: WebSocketServer | null = null;
   private upgradeWss: WebSocketServer | null = null;
   private browser: Browser | null = null;
+  private context: BrowserContext | null = null;
   private page: Page | null = null;
   private launchingBrowserPromise: Promise<void> | null = null;
   private startingPromise: Promise<void> | null = null;
@@ -213,7 +214,9 @@ export class WsBridge {
     return this.latestSyncPayload !== null;
   }
 
-  public prepareWorldPayload(params: SyncWorldParams): void {
+  private buildSyncWorldPayload(
+    params: SyncWorldParams
+  ): Extract<WsRequest, { type: "SYNC_WORLD" }> {
     let textures = params.textures;
     let blockModels = params.blockModels;
     if (!blockModels) {
@@ -223,15 +226,33 @@ export class WsBridge {
       textures = textures ? { ...modelTextures, ...textures } : modelTextures;
     }
 
-    this.latestSyncPayload = {
+    // Deduplicate redundant `minecraft:foo` / `foo` aliases before wire serialization
+    // (the viewer's `getBlockDef` resolves both short and namespaced keys from the short key)
+    let compactBlockModels: Record<string, CompiledBlockDefinition> | undefined;
+    if (blockModels) {
+      compactBlockModels = {};
+      for (const [k, def] of Object.entries(blockModels)) {
+        if (k.startsWith("minecraft:")) {
+          const shortKey = k.slice("minecraft:".length);
+          if (shortKey in blockModels) continue;
+        }
+        compactBlockModels[k] = def;
+      }
+    }
+
+    return {
       type: "SYNC_WORLD",
       id: randomUUID(),
       voxels: params.voxels,
       size: params.size,
       traces: params.traces,
       textures,
-      blockModels,
+      blockModels: compactBlockModels,
     };
+  }
+
+  public prepareWorldPayload(params: SyncWorldParams): void {
+    this.latestSyncPayload = this.buildSyncWorldPayload(params);
   }
 
   public async openViewerInBrowser(opts?: { force?: boolean }): Promise<{
@@ -463,6 +484,13 @@ export class WsBridge {
       return;
     }
 
+    if (msg.type === "ERROR") {
+      clearTimeout(pending.timer);
+      this.pendingRequests.delete(msg.id);
+      pending.reject(new Error(`Viewer error: ${msg.message}`));
+      return;
+    }
+
     if (msg.type === pending.expectedType) {
       clearTimeout(pending.timer);
       this.pendingRequests.delete(msg.id);
@@ -572,11 +600,17 @@ export class WsBridge {
 
         if (this.page && !this.page.isClosed()) {
           await this.page.close().catch(() => {});
+          this.page = null;
+        }
+        if (this.context) {
+          await this.context.close().catch(() => {});
+          this.context = null;
         }
 
         const context = await this.browser.newContext({
           viewport: { width: 1024, height: 1024 },
         });
+        this.context = context;
         const page = await context.newPage();
 
         page.on("console", (msg) => {
@@ -615,29 +649,26 @@ export class WsBridge {
   }
 
   /**
+   * Selects a single deterministic target client for non-broadcast requests
+   * (`RENDER_VIEWS`, `RENDER_INTERIOR`, `INSPECT_PIXEL`), preferring the dedicated
+   * headless Chromium worker when connected so visible interactive browser tabs
+   * are neither frozen nor racing with different cutaway picker buffers.
+   */
+  private selectPrimaryRenderClient(openClients: WebSocket[]): WebSocket | undefined {
+    for (let i = openClients.length - 1; i >= 0; i--) {
+      if (this.clientRoles.get(openClients[i]) === "headless") {
+        return openClients[i];
+      }
+    }
+    return openClients[openClients.length - 1];
+  }
+
+  /**
    * Broadcasts `SYNC_WORLD` to all connected clients (human + headless),
    * caches the payload for future connections, and awaits `SYNC_ACK` from at least one client.
    */
   public async syncWorld(params: SyncWorldParams): Promise<void> {
-    let textures = params.textures;
-    let blockModels = params.blockModels;
-    if (!blockModels) {
-      const uniqueNames = Array.from(new Set(params.voxels.map((v) => v.name)));
-      blockModels = defaultJarAssetLoader.getBlockModelsForBlocks(uniqueNames);
-      const modelTextures = defaultJarAssetLoader.getTexturesForBlocks(uniqueNames);
-      textures = textures ? { ...modelTextures, ...textures } : modelTextures;
-    }
-
-    const id = randomUUID();
-    const request: Extract<WsRequest, { type: "SYNC_WORLD" }> = {
-      type: "SYNC_WORLD",
-      id,
-      voxels: params.voxels,
-      size: params.size,
-      traces: params.traces,
-      textures,
-      blockModels,
-    };
+    const request = this.buildSyncWorldPayload(params);
 
     await this.ensureClientConnected();
 
@@ -837,21 +868,32 @@ export class WsBridge {
         expectedType,
       });
 
-      try {
-        if (broadcastToAll) {
-          for (const client of openClients) {
-            client.send(serialized);
-          }
-        } else {
-          // Prefer the most recently connected active client (or broadcast so whichever responds first resolves)
-          for (const client of openClients) {
-            client.send(serialized);
-          }
+      const targets = broadcastToAll
+        ? openClients
+        : (() => {
+            const primary = this.selectPrimaryRenderClient(openClients);
+            return primary ? [primary] : [];
+          })();
+
+      let sentCount = 0;
+      let lastSendErr: unknown = null;
+      for (const client of targets) {
+        try {
+          client.send(serialized);
+          sentCount++;
+        } catch (err) {
+          lastSendErr = err;
         }
-      } catch (err) {
+      }
+
+      if (sentCount === 0) {
         clearTimeout(timer);
         this.pendingRequests.delete(request.id);
-        reject(err instanceof Error ? err : new Error(String(err)));
+        reject(
+          lastSendErr instanceof Error
+            ? lastSendErr
+            : new Error(`Failed to send ${request.type} to any connected viewer client`)
+        );
       }
     });
   }
@@ -879,6 +921,11 @@ export class WsBridge {
     if (this.page && !this.page.isClosed()) {
       await this.page.close().catch(() => {});
       this.page = null;
+    }
+
+    if (this.context) {
+      await this.context.close().catch(() => {});
+      this.context = null;
     }
 
     if (this.browser) {

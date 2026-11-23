@@ -1,20 +1,10 @@
 #!/usr/bin/env node
 
-// Redirect console output to stderr immediately so stdio MCP JSON-RPC is never polluted
-const writeStderr = (...args: unknown[]) => {
-  const formatted = args
-    .map((a) => (typeof a === "string" ? a : JSON.stringify(a)))
-    .join(" ");
-  process.stderr.write(`${formatted}\n`);
-};
-console.log = writeStderr;
-console.info = writeStderr;
-console.warn = writeStderr;
-console.debug = writeStderr;
-
+import * as fsSync from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
+import { format as utilFormat } from "node:util";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import {
@@ -26,15 +16,18 @@ import {
   type GetPromptResult,
 } from "@modelcontextprotocol/sdk/types.js";
 import { defaultJarAssetLoader, JarAssetLoader } from "../assets/jar-loader.js";
+import { clampResolution } from "../core/block-name.js";
 import { executeBuildScript } from "../core/builder-dsl.js";
 import { loadStructureNbt, saveStructureNbt } from "../core/nbt-io.js";
 import { formatLintReportSummary } from "../core/structure-linter.js";
 import { VoxelWorld } from "../core/voxel-world.js";
 import type {
+  BlockState,
   CameraControlParams,
   CameraPreset,
   CameraProjection,
   CardinalDirection,
+  CompiledBlockDefinition,
   InspectResult,
   InspectViewId,
   RenderInteriorRoomCamera,
@@ -45,8 +38,31 @@ import type {
 } from "../types/shared.js";
 import { WsBridge, type WsBridgeOptions } from "./ws-bridge.js";
 
+let consoleRedirectedToStderr = false;
+
+/**
+ * Redirects `console.log/info/warn/debug` to stderr so stdio MCP JSON-RPC frames
+ * are never polluted. Safe against circular objects, BigInts, and Error instances.
+ */
+function redirectConsoleToStderr(): void {
+  if (consoleRedirectedToStderr) return;
+  consoleRedirectedToStderr = true;
+  const writeStderr = (...args: unknown[]) => {
+    process.stderr.write(`${utilFormat(...args)}\n`);
+  };
+  console.log = writeStderr;
+  console.info = writeStderr;
+  console.warn = writeStderr;
+  console.debug = writeStderr;
+}
+
 export const MAX_LINT_FLOATING_BLOCKS = 100;
 export const MAX_LINT_ISSUES = 200;
+const MAX_REPORT_WARNINGS = 50;
+const MAX_REPORT_LINT_ISSUES = 50;
+const MAX_REPORT_TRACES = 200;
+const DEFAULT_MAX_INTERIOR_ROOMS = 8;
+const MAX_FULL_HEIGHTMAP_DIM = 64;
 
 const VIEW_DIRECTIONS: ViewDirection[] = ["NE", "SE", "SW", "NW"];
 const CARDINAL_DIRECTIONS: CardinalDirection[] = ["N", "S", "E", "W"];
@@ -74,11 +90,28 @@ function parseOptionalFiniteNumber(
   fieldName: string
 ): number | undefined {
   if (val === undefined || val === null) return undefined;
+  if (typeof val === "string" && val.trim() === "") {
+    throw new Error(`Argument "${fieldName}" must be a finite number.`);
+  }
   const num = Number(val);
   if (!Number.isFinite(num)) {
     throw new Error(`Argument "${fieldName}" must be a finite number.`);
   }
   return num;
+}
+
+function parseOptionalBoolean(
+  val: unknown,
+  fieldName: string
+): boolean | undefined {
+  if (val === undefined || val === null) return undefined;
+  if (typeof val === "boolean") return val;
+  if (typeof val === "string") {
+    const lower = val.trim().toLowerCase();
+    if (lower === "true") return true;
+    if (lower === "false") return false;
+  }
+  throw new Error(`Argument "${fieldName}" must be a boolean.`);
 }
 
 function parseOptionalVec3(val: unknown, fieldName: string): Vec3 | undefined {
@@ -213,11 +246,12 @@ function parseCameraControlParams(
 
   const resolution = parseOptionalFiniteNumber(raw.resolution, "resolution");
   if (resolution !== undefined) {
-    params.resolution = Math.max(64, Math.min(2048, Math.floor(resolution)));
+    params.resolution = clampResolution(resolution);
   }
 
-  if (raw.syncViewer !== undefined && raw.syncViewer !== null) {
-    params.syncViewer = Boolean(raw.syncViewer);
+  const syncViewer = parseOptionalBoolean(raw.syncViewer, "syncViewer");
+  if (syncViewer !== undefined) {
+    params.syncViewer = syncViewer;
   }
 
   return params;
@@ -300,8 +334,14 @@ function formatBuildReport(
   if (evaluation.warnings.length > 0) {
     lines.push("");
     lines.push("--- Structural Warnings ---");
-    for (const warning of evaluation.warnings) {
+    const previewWarnings = evaluation.warnings.slice(0, MAX_REPORT_WARNINGS);
+    for (const warning of previewWarnings) {
       lines.push(`- [!] ${warning}`);
+    }
+    if (evaluation.warnings.length > previewWarnings.length) {
+      lines.push(
+        `  ... and ${evaluation.warnings.length - previewWarnings.length} more warning(s) omitted.`
+      );
     }
   }
 
@@ -328,14 +368,20 @@ function formatBuildReport(
   const lintIssues = evaluation.lintIssues ?? [];
   lines.push("");
   lines.push("--- Vanilla Building Linter (Minecraft Block Spec Check) ---");
-  lines.push(formatLintReportSummary(lintIssues));
+  lines.push(formatLintReportSummary(lintIssues, MAX_REPORT_LINT_ISSUES));
 
   const traceEntries = Object.values(traces).sort((a, b) => a.opId - b.opId);
   if (traceEntries.length > 0) {
     lines.push("");
     lines.push("--- Operation Trace Table (opId -> Line -> Code) ---");
-    for (const t of traceEntries) {
+    const previewTraces = traceEntries.slice(0, MAX_REPORT_TRACES);
+    for (const t of previewTraces) {
       lines.push(`  opId #${t.opId} | Line ${t.line}: ${t.codeSnippet}`);
+    }
+    if (traceEntries.length > previewTraces.length) {
+      lines.push(
+        `  ... and ${traceEntries.length - previewTraces.length} more trace entry(ies) omitted.`
+      );
     }
   }
 
@@ -376,11 +422,9 @@ export class MineBuildingMcpServer {
 
   private collectWorldAssets(): {
     textures: Record<string, string>;
-    blockModels: Record<string, import("../types/shared.js").CompiledBlockDefinition>;
+    blockModels: Record<string, CompiledBlockDefinition>;
   } {
-    const uniqueNames = Array.from(
-      new Set(Array.from(this.world.voxels.values(), (v) => v.name))
-    );
+    const uniqueNames = this.world.getUniqueBlockNames();
     return {
       textures: this.assetLoader.getTexturesForBlocks(uniqueNames),
       blockModels: this.assetLoader.getBlockModelsForBlocks(uniqueNames),
@@ -389,10 +433,11 @@ export class MineBuildingMcpServer {
 
   private async syncCurrentWorldToViewer(): Promise<{
     textures: Record<string, string>;
-    blockModels: Record<string, import("../types/shared.js").CompiledBlockDefinition>;
+    blockModels: Record<string, CompiledBlockDefinition>;
+    resolvedMap: Map<string, BlockState>;
   }> {
     const { textures, blockModels } = this.collectWorldAssets();
-    this.world.resolveBlockStates(blockModels);
+    const { resolvedMap } = this.world.resolveBlockStatesWithMap(blockModels);
     const voxels = this.world.getAllVoxels();
     const traces = this.world.getTracesObject();
     await this.wsBridge.syncWorld({
@@ -402,7 +447,7 @@ export class MineBuildingMcpServer {
       textures,
       blockModels,
     });
-    return { textures, blockModels };
+    return { textures, blockModels, resolvedMap };
   }
 
   private async maybeAutoOpenViewer(): Promise<void> {
@@ -426,6 +471,23 @@ export class MineBuildingMcpServer {
     await this.syncCurrentWorldToViewer();
     await this.maybeAutoOpenViewer();
 
+    const [sizeX, , sizeZ] = summary.size;
+    let payloadHeightmap: number[][] = summary.heightmap;
+    let heightmapStep: [number, number] | undefined;
+    if (sizeX > MAX_FULL_HEIGHTMAP_DIM || sizeZ > MAX_FULL_HEIGHTMAP_DIM) {
+      const stepX = Math.max(1, Math.ceil(sizeX / 32));
+      const stepZ = Math.max(1, Math.ceil(sizeZ / 32));
+      heightmapStep = [stepX, stepZ];
+      payloadHeightmap = [];
+      for (let x = 0; x < sizeX; x += stepX) {
+        const row: number[] = [];
+        for (let z = 0; z < sizeZ; z += stepZ) {
+          row.push(summary.heightmap[x][z]);
+        }
+        payloadHeightmap.push(row);
+      }
+    }
+
     const payload = {
       status: "ok",
       nbtPath: resolvedPath,
@@ -436,7 +498,8 @@ export class MineBuildingMcpServer {
       averageY: summary.averageY,
       slopeSummary: summary.slopeSummary,
       blockCounts: summary.blockCounts,
-      heightmap: summary.heightmap,
+      ...(heightmapStep ? { heightmapStep } : {}),
+      heightmap: payloadHeightmap,
     };
 
     return {
@@ -458,15 +521,19 @@ export class MineBuildingMcpServer {
       throw new Error("Missing or invalid required argument: jsCode (string)");
     }
 
-    const resolution =
-      typeof args.resolution === "number" && Number.isFinite(args.resolution)
-        ? Math.max(64, Math.min(2048, Math.floor(args.resolution)))
-        : 512;
+    const resolution = clampResolution(args.resolution, 512);
     const resetBeforeRun = args.resetBeforeRun !== false;
 
-    const execResult = executeBuildScript(this.world, args.jsCode, resetBeforeRun);
-    const { blockModels } = await this.syncCurrentWorldToViewer();
-    const evaluation = this.world.evaluateStructure(blockModels);
+    const execResult = executeBuildScript(
+      this.world,
+      args.jsCode,
+      resetBeforeRun,
+      { evaluate: false }
+    );
+    const { blockModels, resolvedMap } = await this.syncCurrentWorldToViewer();
+    const evaluation = this.world.evaluateStructure(blockModels, {
+      preResolvedStates: resolvedMap,
+    });
     await this.maybeAutoOpenViewer();
     const images = await this.wsBridge.renderViews(resolution);
 
@@ -657,11 +724,13 @@ export class MineBuildingMcpServer {
   public async handleInspectInterior(args: {
     cutY?: number;
     resolution?: number;
+    maxRooms?: number;
   }): Promise<CallToolResult> {
-    const resolution =
-      typeof args?.resolution === "number" && Number.isFinite(args.resolution)
-        ? Math.max(64, Math.min(2048, Math.floor(args.resolution)))
-        : 512;
+    const resolution = clampResolution(args?.resolution, 512);
+    const maxRooms =
+      typeof args?.maxRooms === "number" && Number.isFinite(args.maxRooms)
+        ? Math.max(0, Math.min(32, Math.floor(args.maxRooms)))
+        : DEFAULT_MAX_INTERIOR_ROOMS;
 
     const analysis = this.world.detectInteriorRooms();
     const cutY =
@@ -669,7 +738,8 @@ export class MineBuildingMcpServer {
         ? Math.floor(args.cutY)
         : analysis.suggestedCutY;
 
-    const roomCameras: RenderInteriorRoomCamera[] = analysis.rooms.map((r) => ({
+    const renderedRooms = analysis.rooms.slice(0, maxRooms);
+    const roomCameras: RenderInteriorRoomCamera[] = renderedRooms.map((r) => ({
       roomId: r.roomId,
       eyePosition: r.eyePosition,
     }));
@@ -678,10 +748,13 @@ export class MineBuildingMcpServer {
     await this.maybeAutoOpenViewer();
     const renderRes = await this.wsBridge.renderInterior(cutY, roomCameras, resolution);
 
+    const roomsOmittedCount = Math.max(0, analysis.rooms.length - renderedRooms.length);
     const payload = {
       cutY: renderRes.cutY,
       validFlow: analysis.validFlow,
       roomsCount: analysis.rooms.length,
+      eyeViewsRenderedRooms: renderedRooms.length,
+      ...(roomsOmittedCount > 0 ? { eyeViewsOmittedRooms: roomsOmittedCount } : {}),
       rooms: analysis.rooms.map((r) => ({
         roomId: r.roomId,
         floorY: r.floorY,
@@ -697,10 +770,14 @@ export class MineBuildingMcpServer {
       flowIssues: analysis.flowIssues,
     };
 
+    const omittedNote =
+      roomsOmittedCount > 0
+        ? ` Eye-level renders capped to first ${renderedRooms.length} of ${analysis.rooms.length} room(s) (pass maxRooms to adjust).`
+        : "";
     const content: CallToolResult["content"] = [
       {
         type: "text",
-        text: `${analysis.summaryText}\n\nCutaway Height: cutY=${renderRes.cutY} (Offscreen ID Picker is now synchronized to this Dollhouse Cutaway! Call inspect_pixel(view, u, v) to inspect interior furniture, floors, and inner walls directly).\n\nJSON Details:\n${JSON.stringify(payload, null, 2)}`,
+        text: `${analysis.summaryText}\n\nCutaway Height: cutY=${renderRes.cutY} (Offscreen ID Picker is now synchronized to this Dollhouse Cutaway! Call inspect_pixel(view, u, v) to inspect interior furniture, floors, and inner walls directly).${omittedNote}\n\nJSON Details:\n${JSON.stringify(payload, null, 2)}`,
       },
     ];
 
@@ -719,7 +796,7 @@ export class MineBuildingMcpServer {
       }
     }
 
-    for (const room of analysis.rooms) {
+    for (const room of renderedRooms) {
       const eyeMap = renderRes.roomEyeImages[room.roomId];
       if (!eyeMap) continue;
       for (const dir of CARDINAL_DIRECTIONS) {
@@ -750,12 +827,10 @@ export class MineBuildingMcpServer {
 
     const resolvedPath = path.resolve(args.outputPath);
     await fs.mkdir(path.dirname(resolvedPath), { recursive: true });
-    const uniqueNames = Array.from(
-      new Set(Array.from(this.world.voxels.values(), (v) => v.name))
-    );
+    const uniqueNames = this.world.getUniqueBlockNames();
     const blockModels = this.assetLoader.getBlockModelsForBlocks(uniqueNames);
-    this.world.resolveBlockStates(blockModels);
-    await saveStructureNbt(this.world, resolvedPath, blockModels);
+    const { resolvedMap } = this.world.resolveBlockStatesWithMap(blockModels);
+    await saveStructureNbt(this.world, resolvedPath, blockModels, resolvedMap);
 
     const totalVoxels = this.world.voxels.size;
     let buildVoxels = 0;
@@ -790,10 +865,13 @@ export class MineBuildingMcpServer {
   }
 
   public async handleLintStructure(): Promise<CallToolResult> {
-    const { blockModels } = this.collectWorldAssets();
-    this.world.resolveBlockStates(blockModels);
-    const lintReport = this.world.lintStructure(blockModels);
-    const evaluation = this.world.evaluateStructure(blockModels);
+    const uniqueNames = this.world.getUniqueBlockNames();
+    const blockModels = this.assetLoader.getBlockModelsForBlocks(uniqueNames);
+    const { resolvedMap } = this.world.resolveBlockStatesWithMap(blockModels);
+    const lintReport = this.world.lintStructure(blockModels, resolvedMap);
+    const evaluation = this.world.evaluateStructure(blockModels, {
+      includeLint: false,
+    });
 
     const floatingBlocksSample = evaluation.floatingBlocks.slice(
       0,
@@ -825,7 +903,7 @@ export class MineBuildingMcpServer {
 
     const lines: string[] = [
       "=== MineBuildingMCP Vanilla Building Linter Report ===",
-      lintReport.summaryText,
+      formatLintReportSummary(lintReport.issues, MAX_LINT_ISSUES),
     ];
     if (evaluation.floatingBlocks.length > 0) {
       const truncNote =
@@ -844,8 +922,14 @@ export class MineBuildingMcpServer {
     if (evaluation.warnings.length > 0) {
       lines.push("");
       lines.push("--- Structural Warnings ---");
-      for (const w of evaluation.warnings) {
+      const previewWarnings = evaluation.warnings.slice(0, MAX_REPORT_WARNINGS);
+      for (const w of previewWarnings) {
         lines.push(`- [!] ${w}`);
+      }
+      if (evaluation.warnings.length > previewWarnings.length) {
+        lines.push(
+          `  ... and ${evaluation.warnings.length - previewWarnings.length} more warning(s) omitted.`
+        );
       }
     }
     lines.push("");
@@ -1118,6 +1202,12 @@ export class MineBuildingMcpServer {
                     "Square image resolution in pixels for rendered views (default: 512).",
                   default: 512,
                 },
+                maxRooms: {
+                  type: "number",
+                  description:
+                    "Maximum number of rooms for which 4-direction first-person eye-level PNG views are rendered (default: 8, range 0..32).",
+                  default: 8,
+                },
               },
             },
           },
@@ -1164,18 +1254,17 @@ export class MineBuildingMcpServer {
         switch (name) {
           case "load_terrain":
             return await this.handleLoadTerrain({
-              nbtPath: String(args.nbtPath ?? ""),
+              nbtPath: args.nbtPath as string,
             });
 
           case "run_build_script":
             return await this.handleRunBuildScript({
-              jsCode: String(args.jsCode ?? ""),
-              resolution:
-                args.resolution !== undefined ? Number(args.resolution) : undefined,
-              resetBeforeRun:
-                args.resetBeforeRun !== undefined
-                  ? Boolean(args.resetBeforeRun)
-                  : undefined,
+              jsCode: args.jsCode as string,
+              resolution: parseOptionalFiniteNumber(args.resolution, "resolution"),
+              resetBeforeRun: parseOptionalBoolean(
+                args.resetBeforeRun,
+                "resetBeforeRun"
+              ),
             });
 
           case "lint_structure":
@@ -1188,27 +1277,34 @@ export class MineBuildingMcpServer {
 
           case "open_viewer":
             return await this.handleOpenViewer({
-              force:
-                args.force !== undefined ? Boolean(args.force) : undefined,
+              force: parseOptionalBoolean(args.force, "force"),
             });
 
-          case "inspect_pixel":
+          case "inspect_pixel": {
+            const u = parseOptionalFiniteNumber(args.u, "u");
+            const v = parseOptionalFiniteNumber(args.v, "v");
+            if (u === undefined || v === undefined) {
+              throw new Error(
+                "Missing required numeric arguments u and v for inspect_pixel."
+              );
+            }
             return await this.handleInspectPixel({
               view: String(args.view ?? "") as InspectViewId,
-              u: Number(args.u),
-              v: Number(args.v),
+              u,
+              v,
             });
+          }
 
           case "inspect_interior":
             return await this.handleInspectInterior({
-              cutY: args.cutY !== undefined ? Number(args.cutY) : undefined,
-              resolution:
-                args.resolution !== undefined ? Number(args.resolution) : undefined,
+              cutY: parseOptionalFiniteNumber(args.cutY, "cutY"),
+              resolution: parseOptionalFiniteNumber(args.resolution, "resolution"),
+              maxRooms: parseOptionalFiniteNumber(args.maxRooms, "maxRooms"),
             });
 
           case "export_structure":
             return await this.handleExportStructure({
-              outputPath: String(args.outputPath ?? ""),
+              outputPath: args.outputPath as string,
             });
 
           default:
@@ -1239,6 +1335,7 @@ export class MineBuildingMcpServer {
   }
 
   public async startStdio(): Promise<void> {
+    redirectConsoleToStderr();
     // Start Vite + WebSocket server in background and sync initial default world
     await this.wsBridge.start();
     const transport = new StdioServerTransport();
@@ -1256,6 +1353,7 @@ export class MineBuildingMcpServer {
 export { MineBuildingMcpServer as CraftStudioMcpServer };
 
 export async function startMcpServer(): Promise<MineBuildingMcpServer> {
+  redirectConsoleToStderr();
   const mcpServer = new MineBuildingMcpServer();
   await mcpServer.startStdio();
 
@@ -1273,8 +1371,18 @@ export async function startMcpServer(): Promise<MineBuildingMcpServer> {
 const isMain = (() => {
   if (!process.argv[1]) return false;
   try {
-    const currentFile = fileURLToPath(import.meta.url);
-    const entryFile = path.resolve(process.argv[1]);
+    const normalizePathForCompare = (p: string): string => {
+      let resolved = path.resolve(p);
+      try {
+        resolved = fsSync.realpathSync(resolved);
+      } catch {
+        // Keep path.resolve result when path cannot be realpath'd
+      }
+      const posix = resolved.replace(/\\/g, "/");
+      return process.platform === "win32" ? posix.toLowerCase() : posix;
+    };
+    const currentFile = normalizePathForCompare(fileURLToPath(import.meta.url));
+    const entryFile = normalizePathForCompare(process.argv[1]);
     return (
       currentFile === entryFile ||
       currentFile.replace(/\.ts$/, ".js") === entryFile ||
@@ -1287,6 +1395,7 @@ const isMain = (() => {
 })();
 
 if (isMain) {
+  redirectConsoleToStderr();
   startMcpServer().catch((err) => {
     process.stderr.write(`[MineBuildingMCP] Fatal startup error: ${String(err)}\n`);
     process.exit(1);

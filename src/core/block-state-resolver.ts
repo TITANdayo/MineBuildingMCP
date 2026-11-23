@@ -6,6 +6,7 @@ import type {
   MultipartCondition,
   VoxelData,
 } from "../types/shared.js";
+import { coordKey, toShortBlockId } from "./block-name.js";
 
 export const ALL_DIRS: McFaceDirection[] = [
   "down",
@@ -80,16 +81,128 @@ export const CANONICAL_STATE_DEFAULTS: Record<string, string> = {
   drag: "true",
 };
 
+const FALLBACK_MULTIFACE_DIRS: Record<string, McFaceDirection[]> = {
+  vine: ["north", "south", "east", "west", "up"],
+  glow_lichen: ["down", "up", "north", "south", "west", "east"],
+  sculk_vein: ["down", "up", "north", "south", "west", "east"],
+  resin_clump: ["down", "up", "north", "south", "west", "east"],
+};
+
+const FALLBACK_NON_OPAQUE_EXACT = new Set([
+  "vine",
+  "glow_lichen",
+  "sculk_vein",
+  "resin_clump",
+  "chain",
+  "iron_chain",
+  "lantern",
+  "soul_lantern",
+  "torch",
+  "soul_torch",
+  "redstone_torch",
+  "wall_torch",
+  "soul_wall_torch",
+  "redstone_wall_torch",
+  "lever",
+  "bell",
+  "grindstone",
+  "ladder",
+  "tripwire_hook",
+  "end_rod",
+  "lightning_rod",
+  "hopper",
+  "iron_bars",
+  "glass",
+  "glass_pane",
+  "tinted_glass",
+  "water",
+  "lava",
+  "rail",
+  "powered_rail",
+  "detector_rail",
+  "activator_rail",
+]);
+
+function isFallbackNonOpaqueCubeName(shortName: string): boolean {
+  if (FALLBACK_NON_OPAQUE_EXACT.has(shortName)) return true;
+  return (
+    shortName.endsWith("_fence") ||
+    shortName.endsWith("_fence_gate") ||
+    shortName.endsWith("_wall") ||
+    shortName.endsWith("_stairs") ||
+    shortName.endsWith("_slab") ||
+    shortName.endsWith("_pane") ||
+    shortName.endsWith("_bars") ||
+    shortName.endsWith("_door") ||
+    shortName.endsWith("_trapdoor") ||
+    shortName.endsWith("_torch") ||
+    shortName.endsWith("_lantern") &&
+      shortName !== "sea_lantern" &&
+      shortName !== "jack_o_lantern" ||
+    shortName.endsWith("_chain") ||
+    shortName.endsWith("_button") ||
+    shortName.endsWith("_pressure_plate") ||
+    shortName.endsWith("_carpet") ||
+    shortName.endsWith("_sign") ||
+    shortName.endsWith("_banner") ||
+    shortName.endsWith("_bed") ||
+    shortName.endsWith("_leaves") ||
+    shortName.endsWith("_glass")
+  );
+}
+
+interface ParsedVariantEntry {
+  key: string;
+  pairs: Array<[string, string]>;
+  refs: AppliedModelRef[];
+}
+
+interface CachedDefMetadata {
+  parsedVariants?: ParsedVariantEntry[];
+  variantPropValues?: Record<string, Set<string>>;
+  multipartPropValues?: Record<string, Set<string>>;
+  connectionKind?: BlockConnectionKind;
+  defaultFacing?: string | null;
+}
+
+const defMetaCache = new WeakMap<CompiledBlockDefinition, CachedDefMetadata>();
+
+function getDefMeta(def: CompiledBlockDefinition): CachedDefMetadata {
+  let meta = defMetaCache.get(def);
+  if (!meta) {
+    meta = {};
+    defMetaCache.set(def, meta);
+  }
+  return meta;
+}
+
+function getParsedVariants(def: CompiledBlockDefinition): ParsedVariantEntry[] {
+  const meta = getDefMeta(def);
+  if (meta.parsedVariants) {
+    return meta.parsedVariants;
+  }
+  const parsed: ParsedVariantEntry[] = [];
+  if (def.variants) {
+    for (const [key, refs] of Object.entries(def.variants)) {
+      const pairs: Array<[string, string]> = [];
+      if (key !== "") {
+        for (const pair of key.split(",")) {
+          const eqIdx = pair.indexOf("=");
+          if (eqIdx === -1) continue;
+          const prop = pair.slice(0, eqIdx).trim().toLowerCase();
+          const val = pair.slice(eqIdx + 1).trim().toLowerCase();
+          pairs.push([prop, val]);
+        }
+      }
+      parsed.push({ key, pairs, refs });
+    }
+  }
+  meta.parsedVariants = parsed;
+  return parsed;
+}
+
 export function normalizeShortBlockName(name: string): string {
-  let clean = name.trim().toLowerCase();
-  if (clean.startsWith("minecraft:")) {
-    clean = clean.slice("minecraft:".length);
-  }
-  const bracketIdx = clean.indexOf("[");
-  if (bracketIdx !== -1) {
-    clean = clean.slice(0, bracketIdx);
-  }
-  return clean;
+  return toShortBlockId(name);
 }
 
 export function hasTag(def: CompiledBlockDefinition | undefined, tagName: string): boolean {
@@ -109,42 +222,56 @@ export function getDefaultPropValue(
   prop: string
 ): string | undefined {
   if (prop === "facing" && def.variants) {
-    const entries = Object.entries(def.variants);
-    const hasFacingVal = (val: string) =>
-      entries.some(([k]) => new RegExp(`(^|,)facing=${val}(,|$)`, "i").test(k));
+    const meta = getDefMeta(def);
+    if (meta.defaultFacing !== undefined) {
+      return meta.defaultFacing ?? CANONICAL_STATE_DEFAULTS.facing;
+    }
+
+    const entries = getParsedVariants(def);
+    const hasFacingPair = (entry: ParsedVariantEntry, val: string): boolean =>
+      entry.pairs.some(([p, v]) => p === "facing" && v === val);
+    const hasFacingVal = (val: string): boolean =>
+      entries.some((e) => hasFacingPair(e, val));
+
+    let computed: string | null = null;
 
     // For non-full-cube directional blocks (rods, clusters, hoppers, etc.),
     // inspect which facing variant uses the unrotated base model (`x=0, y=0`).
     if (!def.isFullOpaqueCube) {
+      const baseModelName = normalizeShortBlockName(def.blockName);
       const hasUnrotatedAt = (val: string) =>
         entries.some(
-          ([k, refs]) =>
-            new RegExp(`(^|,)facing=${val}(,|$)`, "i").test(k) &&
-            refs.some((r) => !r.x && !r.y)
+          (e) => hasFacingPair(e, val) && e.refs.some((r) => !r.x && !r.y)
         );
       const hasBaseModelUnrotatedAt = (val: string) =>
         entries.some(
-          ([k, refs]) =>
-            new RegExp(`(^|,)facing=${val}(,|$)`, "i").test(k) &&
-            refs.some((r) => !r.x && !r.y && r.model === normalizeShortBlockName(def.blockName))
+          (e) =>
+            hasFacingPair(e, val) &&
+            e.refs.some((r) => !r.x && !r.y && r.model === baseModelName)
         );
 
       if (hasUnrotatedAt("up") && !hasUnrotatedAt("north")) {
-        return "up";
-      }
-      if (hasBaseModelUnrotatedAt("down") && !hasBaseModelUnrotatedAt("north")) {
-        return "down";
+        computed = "up";
+      } else if (hasBaseModelUnrotatedAt("down") && !hasBaseModelUnrotatedAt("north")) {
+        computed = "down";
       }
     }
 
-    if (hasFacingVal("north")) {
-      return "north";
-    }
-    for (const candidate of ["up", "down", "south", "east", "west"]) {
-      if (hasFacingVal(candidate)) {
-        return candidate;
+    if (!computed) {
+      if (hasFacingVal("north")) {
+        computed = "north";
+      } else {
+        for (const candidate of ["up", "down", "south", "east", "west"]) {
+          if (hasFacingVal(candidate)) {
+            computed = candidate;
+            break;
+          }
+        }
       }
     }
+
+    meta.defaultFacing = computed;
+    return computed ?? CANONICAL_STATE_DEFAULTS.facing;
   }
   return CANONICAL_STATE_DEFAULTS[prop];
 }
@@ -160,9 +287,14 @@ export function getFallbackBlockDef(blockName: string): CompiledBlockDefinition 
     models: {
       [shortName]: [{ from: [0, 0, 0], to: [16, 16, 16], faces }],
     },
-    isFullOpaqueCube: true,
-    isFluid: false,
-    isTranslucent: false,
+    isFullOpaqueCube: !isFallbackNonOpaqueCubeName(shortName),
+    isFluid: shortName === "water" || shortName === "lava",
+    isTranslucent:
+      shortName === "water" ||
+      shortName === "lava" ||
+      shortName.endsWith("_stained_glass") ||
+      shortName.endsWith("_stained_glass_pane"),
+    isFallback: true,
   };
 }
 
@@ -196,46 +328,53 @@ export function getExistingBlockDef(
 export function collectMultipartPropValues(
   def: CompiledBlockDefinition
 ): Record<string, Set<string>> {
-  const map: Record<string, Set<string>> = {};
-  if (!def.multipart) return map;
-
-  const visit = (cond?: MultipartCondition) => {
-    if (!cond) return;
-    if (Array.isArray(cond.OR)) cond.OR.forEach(visit);
-    if (Array.isArray(cond.AND)) cond.AND.forEach(visit);
-    for (const [k, rawVal] of Object.entries(cond)) {
-      if (k === "OR" || k === "AND" || rawVal === undefined) continue;
-      const prop = k.toLowerCase();
-      if (!map[prop]) map[prop] = new Set();
-      for (const opt of String(rawVal).toLowerCase().split("|")) {
-        map[prop].add(opt.trim());
-      }
-    }
-  };
-
-  for (const mc of def.multipart) {
-    visit(mc.when);
+  const meta = getDefMeta(def);
+  if (meta.multipartPropValues) {
+    return meta.multipartPropValues;
   }
+
+  const map: Record<string, Set<string>> = {};
+  if (def.multipart) {
+    const visit = (cond?: MultipartCondition) => {
+      if (!cond) return;
+      if (Array.isArray(cond.OR)) cond.OR.forEach(visit);
+      if (Array.isArray(cond.AND)) cond.AND.forEach(visit);
+      for (const [k, rawVal] of Object.entries(cond)) {
+        if (k === "OR" || k === "AND" || rawVal === undefined) continue;
+        const prop = k.toLowerCase();
+        if (!map[prop]) map[prop] = new Set();
+        for (const opt of String(rawVal).toLowerCase().split("|")) {
+          map[prop].add(opt.trim());
+        }
+      }
+    };
+
+    for (const mc of def.multipart) {
+      visit(mc.when);
+    }
+  }
+
+  meta.multipartPropValues = map;
   return map;
 }
 
 export function collectVariantPropValues(
   def: CompiledBlockDefinition
 ): Record<string, Set<string>> {
-  const map: Record<string, Set<string>> = {};
-  if (!def.variants) return map;
+  const meta = getDefMeta(def);
+  if (meta.variantPropValues) {
+    return meta.variantPropValues;
+  }
 
-  for (const key of Object.keys(def.variants)) {
-    if (!key) continue;
-    for (const pair of key.split(",")) {
-      const eqIdx = pair.indexOf("=");
-      if (eqIdx === -1) continue;
-      const prop = pair.slice(0, eqIdx).trim().toLowerCase();
-      const val = pair.slice(eqIdx + 1).trim().toLowerCase();
+  const map: Record<string, Set<string>> = {};
+  for (const entry of getParsedVariants(def)) {
+    for (const [prop, val] of entry.pairs) {
       if (!map[prop]) map[prop] = new Set();
       map[prop].add(val);
     }
   }
+
+  meta.variantPropValues = map;
   return map;
 }
 
@@ -244,8 +383,8 @@ export function hasVariantProp(
   propName: string
 ): boolean {
   if (!def.variants) return false;
-  const token = `${propName.toLowerCase()}=`;
-  return Object.keys(def.variants).some((k) => k.toLowerCase().includes(token));
+  const vProps = collectVariantPropValues(def);
+  return propName.toLowerCase() in vProps;
 }
 
 export type BlockConnectionKind =
@@ -286,6 +425,9 @@ function hasAllFalseFallbackMultipart(def: CompiledBlockDefinition): boolean {
 
 function isStairBlockDef(def: CompiledBlockDefinition): boolean {
   if (hasTag(def, "stairs")) return true;
+  if (def.isFallback) {
+    return normalizeShortBlockName(def.blockName).endsWith("_stairs");
+  }
   if (!def.variants) return false;
   const vProps = collectVariantPropValues(def);
   return Boolean(
@@ -298,92 +440,116 @@ function isStairBlockDef(def: CompiledBlockDefinition): boolean {
 
 function isFenceGateBlockDef(def: CompiledBlockDefinition): boolean {
   if (hasTag(def, "fence_gates")) return true;
+  if (def.isFallback) {
+    return normalizeShortBlockName(def.blockName).endsWith("_fence_gate");
+  }
   if (!def.variants) return false;
   const vProps = collectVariantPropValues(def);
   return Boolean(vProps.facing && vProps.in_wall && vProps.open);
 }
 
 /**
+ * Returns the supported clinging face directions for a `multiface_clinging` block,
+ * using compiled multipart properties when available and vanilla defaults only in fallback mode.
+ */
+export function getMultifaceSupportedDirs(def: CompiledBlockDefinition): McFaceDirection[] {
+  const dirValues = collectMultipartPropValues(def);
+  const fromMultipart = ALL_DIRS.filter((d) => Boolean(dirValues[d]));
+  if (fromMultipart.length > 0) {
+    return fromMultipart;
+  }
+  if (def.isFallback) {
+    const shortName = normalizeShortBlockName(def.blockName);
+    return FALLBACK_MULTIFACE_DIRS[shortName] ?? [];
+  }
+  return [];
+}
+
+/**
  * Classifies a block's neighbor-connection behavior strictly from its compiled
  * JAR tags (`data/minecraft/tags/block(s)/*.json`) and blockstate property schema
- * (`multipart` / `variants`) without any hardcoded block names.
+ * (`multipart` / `variants`) whenever JAR data is available, falling back to
+ * canonical vanilla name suffixes only when `def.isFallback === true`.
  */
 export function classifyBlockConnectionKind(
   def: CompiledBlockDefinition
 ): BlockConnectionKind {
+  const meta = getDefMeta(def);
+  if (meta.connectionKind !== undefined) {
+    return meta.connectionKind;
+  }
+
+  let kind: BlockConnectionKind = "none";
+
   if (def.multipart && def.multipart.length > 0) {
     const dirValues = collectMultipartPropValues(def);
     const hasAllCardinals = CARDINAL_DIRS.every((d) => Boolean(dirValues[d]));
-    if (!hasAllCardinals) {
-      return "none";
-    }
+    if (hasAllCardinals) {
+      const usesWallHeights = CARDINAL_DIRS.every(
+        (d) => dirValues[d].has("low") || dirValues[d].has("tall")
+      );
+      const hasUnconditionalPart = def.multipart.some((mc) => !mc.when);
+      const cardinalsBoolean = CARDINAL_DIRS.every((d) => isBooleanOnlySet(dirValues[d]));
 
-    const usesWallHeights = CARDINAL_DIRS.every(
-      (d) => dirValues[d].has("low") || dirValues[d].has("tall")
-    );
-    // Wall: tagged #walls, or has 4 cardinal low|tall properties + up post property (and no bottom property like pale_moss_carpet)
-    if (
-      hasTag(def, "walls") ||
-      (usesWallHeights && Boolean(dirValues.up) && !dirValues.bottom)
-    ) {
-      return "wall";
-    }
-
-    const hasUnconditionalPart = def.multipart.some((mc) => !mc.when);
-    const cardinalsBoolean = CARDINAL_DIRS.every((d) => isBooleanOnlySet(dirValues[d]));
-
-    // Wall-clinging multiface blocks (e.g. vine, glow_lichen, sculk_vein, resin_clump):
-    // - No unconditional center post part
-    // - All 4 cardinals + up (and optional down) are boolean properties
-    // - Has an all-false fallback condition (when all faces are false)
-    if (
-      !hasUnconditionalPart &&
-      cardinalsBoolean &&
-      isBooleanOnlySet(dirValues.up) &&
-      (!dirValues.down || isBooleanOnlySet(dirValues.down)) &&
-      hasAllFalseFallbackMultipart(def)
-    ) {
-      return "multiface_clinging";
-    }
-
-    // Fence: tagged #fences, or has unconditional center post, 4 boolean cardinal arms (true only), no up/down
-    if (
-      hasTag(def, "fences") ||
-      (hasUnconditionalPart &&
+      if (
+        hasTag(def, "walls") ||
+        (usesWallHeights && Boolean(dirValues.up) && !dirValues.bottom)
+      ) {
+        kind = "wall";
+      } else if (
+        !hasUnconditionalPart &&
         cardinalsBoolean &&
-        !dirValues.up &&
-        !dirValues.down &&
-        CARDINAL_DIRS.every((d) => dirValues[d].has("true") && !dirValues[d].has("false")))
-    ) {
-      return "fence";
+        isBooleanOnlySet(dirValues.up) &&
+        (!dirValues.down || isBooleanOnlySet(dirValues.down)) &&
+        hasAllFalseFallbackMultipart(def)
+      ) {
+        kind = "multiface_clinging";
+      } else if (
+        hasTag(def, "fences") ||
+        (hasUnconditionalPart &&
+          cardinalsBoolean &&
+          !dirValues.up &&
+          !dirValues.down &&
+          CARDINAL_DIRS.every((d) => dirValues[d].has("true") && !dirValues[d].has("false")))
+      ) {
+        kind = "fence";
+      } else if (
+        hasTag(def, "bars") ||
+        (hasUnconditionalPart &&
+          !hasTag(def, "fences") &&
+          cardinalsBoolean &&
+          !dirValues.up &&
+          !dirValues.down &&
+          CARDINAL_DIRS.every((d) => dirValues[d].has("true") && dirValues[d].has("false")))
+      ) {
+        kind = "pane_or_bar";
+      }
     }
-
-    // Pane / Iron Bars: tagged #bars, or has unconditional post (or all-false post cap) and 4 boolean cardinals with both true and false
-    if (
-      hasTag(def, "bars") ||
-      (hasUnconditionalPart &&
-        !hasTag(def, "fences") &&
-        cardinalsBoolean &&
-        !dirValues.up &&
-        !dirValues.down &&
-        CARDINAL_DIRS.every((d) => dirValues[d].has("true") && dirValues[d].has("false")))
-    ) {
-      return "pane_or_bar";
+  } else if (def.isFallback) {
+    const shortName = normalizeShortBlockName(def.blockName);
+    if (shortName in FALLBACK_MULTIFACE_DIRS) {
+      kind = "multiface_clinging";
+    } else if (shortName.endsWith("_wall")) {
+      kind = "wall";
+    } else if (shortName.endsWith("_fence_gate")) {
+      kind = "fence_gate";
+    } else if (shortName.endsWith("_fence")) {
+      kind = "fence";
+    } else if (shortName.endsWith("_pane") || shortName === "iron_bars" || shortName.endsWith("_bars")) {
+      kind = "pane_or_bar";
+    } else if (shortName.endsWith("_stairs")) {
+      kind = "stairs";
     }
-
-    return "none";
-  }
-
-  if (def.variants) {
+  } else if (def.variants) {
     if (isStairBlockDef(def)) {
-      return "stairs";
-    }
-    if (isFenceGateBlockDef(def)) {
-      return "fence_gate";
+      kind = "stairs";
+    } else if (isFenceGateBlockDef(def)) {
+      kind = "fence_gate";
     }
   }
 
-  return "none";
+  meta.connectionKind = kind;
+  return kind;
 }
 
 export function evaluateMultipartCondition(
@@ -450,8 +616,8 @@ function dirRight(facing: string): "north" | "south" | "east" | "west" {
   }
 }
 
-function horizDelta(dir: "north" | "south" | "east" | "west" | string): [number, number] {
-  switch (dir) {
+export function horizDelta(dir: string): [number, number] {
+  switch (dir.toLowerCase()) {
     case "north":
       return [0, -1];
     case "south":
@@ -476,24 +642,17 @@ function isPerpendicularGateDirection(
   return gf === "north" || gf === "south";
 }
 
-function resolveVariantModelRefsFromOwnState(
-  voxel: VoxelData,
+function matchVariantModelRefs(
+  rawState: Record<string, string>,
   def: CompiledBlockDefinition
 ): AppliedModelRef[] {
-  if (!def.variants) return [];
-  const entries = Object.entries(def.variants);
+  const entries = getParsedVariants(def);
   if (entries.length === 0) return [];
-  if (entries.length === 1 && entries[0][0] === "") {
-    return entries[0][1];
+  if (entries.length === 1 && entries[0].key === "") {
+    return entries[0].refs;
   }
 
-  const state: Record<string, string> = {};
-  if (voxel.state) {
-    for (const [k, v] of Object.entries(voxel.state)) {
-      state[k.toLowerCase()] = String(v).toLowerCase();
-    }
-  }
-
+  const state: Record<string, string> = { ...rawState };
   const usesType = hasVariantProp(def, "type");
   const usesHalf = hasVariantProp(def, "half");
   if (usesType && !("type" in state) && "half" in state) {
@@ -503,28 +662,22 @@ function resolveVariantModelRefsFromOwnState(
     state.half = state.type;
   }
 
-  let bestRefs = entries[0][1];
+  let bestRefs = entries[0].refs;
   let bestScore = -Infinity;
 
-  for (const [key, refs] of entries) {
-    if (key === "") {
+  for (const entry of entries) {
+    if (entry.key === "") {
       if (0 > bestScore) {
         bestScore = 0;
-        bestRefs = refs;
+        bestRefs = entry.refs;
       }
       continue;
     }
 
-    const pairs = key.split(",");
     let score = 0;
     let valid = true;
 
-    for (const pair of pairs) {
-      const eqIdx = pair.indexOf("=");
-      if (eqIdx === -1) continue;
-      const prop = pair.slice(0, eqIdx).trim().toLowerCase();
-      const val = pair.slice(eqIdx + 1).trim().toLowerCase();
-
+    for (const [prop, val] of entry.pairs) {
       if (prop in state) {
         if (state[prop] === val) {
           score += 100;
@@ -539,11 +692,25 @@ function resolveVariantModelRefsFromOwnState(
 
     if (valid && score > bestScore) {
       bestScore = score;
-      bestRefs = refs;
+      bestRefs = entry.refs;
     }
   }
 
   return bestRefs;
+}
+
+function resolveVariantModelRefsFromOwnState(
+  voxel: VoxelData,
+  def: CompiledBlockDefinition
+): AppliedModelRef[] {
+  if (!def.variants) return [];
+  const state: Record<string, string> = {};
+  if (voxel.state) {
+    for (const [k, v] of Object.entries(voxel.state)) {
+      state[k.toLowerCase()] = String(v).toLowerCase();
+    }
+  }
+  return matchVariantModelRefs(state, def);
 }
 
 /**
@@ -557,6 +724,14 @@ export function isInstanceFullOpaqueCube(
   _voxelMap: Map<string, VoxelData>,
   _blockModels?: Record<string, CompiledBlockDefinition>
 ): boolean {
+  if (def.isFallback) {
+    const shortName = normalizeShortBlockName(def.blockName);
+    if (shortName.endsWith("_slab")) {
+      const t = (voxel.state?.type ?? voxel.state?.half ?? "").toLowerCase();
+      return t === "double";
+    }
+    return !isFallbackNonOpaqueCubeName(shortName);
+  }
   if (def.isFullOpaqueCube) return true;
   if (def.isFluid || def.isTranslucent || !def.variants) return false;
 
@@ -599,7 +774,12 @@ export function canConnectorAttach(
   if (!neighbor || !nDef || nDef.isFluid) return false;
 
   // In Minecraft, fences, walls, and panes/bars never connect to leaves (#minecraft:leaves)
-  if (hasTag(nDef, "leaves")) return false;
+  if (
+    hasTag(nDef, "leaves") ||
+    (nDef.isFallback && normalizeShortBlockName(nDef.blockName).endsWith("_leaves"))
+  ) {
+    return false;
+  }
 
   // All three connect to full opaque cubes (including double slabs)
   if (isInstanceFullOpaqueCube(neighbor, nDef, voxelMap, blockModels)) {
@@ -613,6 +793,14 @@ export function canConnectorAttach(
       if (nDef.blockName === myDef.blockName) return true;
       // Wooden fences connect to other wooden fences, but not to nether_brick_fence
       if (hasTag(myDef, "wooden_fences") && hasTag(nDef, "wooden_fences")) {
+        return true;
+      }
+      if (
+        myDef.isFallback &&
+        nDef.isFallback &&
+        !myDef.blockName.includes("nether_brick") &&
+        !nDef.blockName.includes("nether_brick")
+      ) {
         return true;
       }
       return false;
@@ -655,7 +843,7 @@ function computeDynamicStairShape(
     dx: number,
     dz: number
   ): { facing: string; half: string } | null => {
-    const neighbor = voxelMap.get(`${voxel.x + dx},${voxel.y},${voxel.z + dz}`);
+    const neighbor = voxelMap.get(coordKey(voxel.x + dx, voxel.y, voxel.z + dz));
     if (!neighbor) return null;
     const nDef = getBlockDef(neighbor.name, blockModels);
     if (!isStairBlockDef(nDef)) return null;
@@ -751,7 +939,7 @@ export function resolveEffectiveBlockState(
     for (const dir of CARDINAL_DIRS) {
       if (!isExplicit(dir)) {
         const [dx, dz] = horizDelta(dir);
-        const neighbor = voxelMap.get(`${voxel.x + dx},${voxel.y},${voxel.z + dz}`);
+        const neighbor = voxelMap.get(coordKey(voxel.x + dx, voxel.y, voxel.z + dz));
         const nDef = neighbor ? getBlockDef(neighbor.name, blockModels) : undefined;
         const connected = canConnectorAttach(
           kind,
@@ -769,7 +957,7 @@ export function resolveEffectiveBlockState(
   }
 
   if (kind === "wall") {
-    const aboveKey = `${voxel.x},${voxel.y + 1},${voxel.z}`;
+    const aboveKey = coordKey(voxel.x, voxel.y + 1, voxel.z);
     const aboveVoxel = voxelMap.get(aboveKey);
     const aboveDef = aboveVoxel ? getBlockDef(aboveVoxel.name, blockModels) : undefined;
     const aboveKind = aboveDef ? classifyBlockConnectionKind(aboveDef) : "none";
@@ -783,7 +971,7 @@ export function resolveEffectiveBlockState(
     for (const dir of CARDINAL_DIRS) {
       if (!isExplicit(dir)) {
         const [dx, dz] = horizDelta(dir);
-        const neighbor = voxelMap.get(`${voxel.x + dx},${voxel.y},${voxel.z + dz}`);
+        const neighbor = voxelMap.get(coordKey(voxel.x + dx, voxel.y, voxel.z + dz));
         const nDef = neighbor ? getBlockDef(neighbor.name, blockModels) : undefined;
         const connected = canConnectorAttach(
           "wall",
@@ -801,7 +989,7 @@ export function resolveEffectiveBlockState(
           if (!raiseToTall && aboveVoxel && aboveDef) {
             if (aboveKind === "wall" || aboveKind === "pane_or_bar") {
               const aboveNeighbor = voxelMap.get(
-                `${voxel.x + dx},${voxel.y + 1},${voxel.z + dz}`
+                coordKey(voxel.x + dx, voxel.y + 1, voxel.z + dz)
               );
               const aboveNDef = aboveNeighbor
                 ? getBlockDef(aboveNeighbor.name, blockModels)
@@ -832,26 +1020,24 @@ export function resolveEffectiveBlockState(
         nC && sC && !eC && !wC && effectiveState.north === effectiveState.south;
       const straightEW =
         eC && wC && !nC && !sC && effectiveState.east === effectiveState.west;
+      const isStraight = straightNS || straightEW;
 
       if (aboveVoxel && aboveDef && !aboveDef.isFluid) {
         if (hasTag(aboveDef, "wall_post_override") || aboveKind === "fence_gate") {
           effectiveState.up = "true";
         } else if (aboveKind === "wall") {
           const aboveResolved = resolvedStates?.get(aboveKey) ?? aboveVoxel.state;
-          if (aboveResolved?.up) {
-            effectiveState.up = aboveResolved.up === "true" ? "true" : "false";
-          } else {
-            effectiveState.up = straightNS || straightEW ? "false" : "true";
-          }
+          // In vanilla Minecraft, a corner/end wall always keeps its post (`!isStraight`),
+          // and a straight wall raises its post if the stacked wall above it has `up=true`.
+          effectiveState.up =
+            !isStraight || aboveResolved?.up === "true" ? "true" : "false";
         } else if (!aboveIsSolid) {
           effectiveState.up = "true";
         } else {
-          effectiveState.up = straightNS || straightEW ? "false" : "true";
+          effectiveState.up = isStraight ? "false" : "true";
         }
-      } else if (straightNS || straightEW) {
-        effectiveState.up = "false";
       } else {
-        effectiveState.up = "true";
+        effectiveState.up = isStraight ? "false" : "true";
       }
     }
 
@@ -873,7 +1059,7 @@ export function resolveEffectiveBlockState(
       const sideDirs = [dirLeft(facing), dirRight(facing)];
       const touchesWall = sideDirs.some((d) => {
         const [dx, dz] = horizDelta(d);
-        const neighbor = voxelMap.get(`${voxel.x + dx},${voxel.y},${voxel.z + dz}`);
+        const neighbor = voxelMap.get(coordKey(voxel.x + dx, voxel.y, voxel.z + dz));
         if (!neighbor) return false;
         const nDef = getBlockDef(neighbor.name, blockModels);
         return classifyBlockConnectionKind(nDef) === "wall";
@@ -902,8 +1088,7 @@ export function resolveEffectiveBlockState(
   }
 
   if (kind === "multiface_clinging") {
-    const dirValues = collectMultipartPropValues(def);
-    const supportedDirs = ALL_DIRS.filter((d) => Boolean(dirValues[d]));
+    const supportedDirs = getMultifaceSupportedDirs(def);
     const hasAnyExplicitTrue = supportedDirs.some(
       (d) => isExplicit(d) && effectiveState[d] === "true"
     );
@@ -926,7 +1111,7 @@ export function resolveEffectiveBlockState(
         continue;
       }
       const [dx, dy, dz] = DIR_VECTORS[d];
-      const neighbor = voxelMap.get(`${voxel.x + dx},${voxel.y + dy},${voxel.z + dz}`);
+      const neighbor = voxelMap.get(coordKey(voxel.x + dx, voxel.y + dy, voxel.z + dz));
       if (!neighbor) {
         effectiveState[d] = "false";
         continue;
@@ -944,7 +1129,7 @@ export function resolveEffectiveBlockState(
     // from the same block directly above (y + 1), which is already resolved in top-down Y order
     // (or walked upward if called standalone without a pre-populated resolvedStates map).
     if (attachedCount === 0) {
-      const aboveKey = `${voxel.x},${voxel.y + 1},${voxel.z}`;
+      const aboveKey = coordKey(voxel.x, voxel.y + 1, voxel.z);
       const aboveVoxel = voxelMap.get(aboveKey);
       if (
         aboveVoxel &&
@@ -956,7 +1141,7 @@ export function resolveEffectiveBlockState(
           // Standalone call fallback: bounded walk up the hanging column
           let curY = voxel.y + 1;
           while (curY <= voxel.y + 64) {
-            const k = `${voxel.x},${curY},${voxel.z}`;
+            const k = coordKey(voxel.x, curY, voxel.z);
             const vAbove = voxelMap.get(k);
             if (
               !vAbove ||
@@ -974,7 +1159,7 @@ export function resolveEffectiveBlockState(
                 continue;
               }
               const [dx, dz] = horizDelta(dir);
-              const n = voxelMap.get(`${vAbove.x + dx},${vAbove.y},${vAbove.z + dz}`);
+              const n = voxelMap.get(coordKey(vAbove.x + dx, vAbove.y, vAbove.z + dz));
               if (n) {
                 const nDef = getBlockDef(n.name, blockModels);
                 if (
@@ -1021,7 +1206,7 @@ export function resolveWorldBlockStates(
 ): Map<string, BlockState> {
   const voxelMap = new Map<string, VoxelData>();
   for (const v of voxels) {
-    voxelMap.set(`${v.x},${v.y},${v.z}`, v);
+    voxelMap.set(coordKey(v.x, v.y, v.z), v);
   }
 
   const sorted = [...voxels].sort(
@@ -1030,7 +1215,7 @@ export function resolveWorldBlockStates(
   const resolvedStates = new Map<string, BlockState>();
 
   for (const voxel of sorted) {
-    const key = `${voxel.x},${voxel.y},${voxel.z}`;
+    const key = coordKey(voxel.x, voxel.y, voxel.z);
     const def = getBlockDef(voxel.name, blockModels);
     const explicitKeys = explicitStateKeysMap?.get(key);
     const state = resolveEffectiveBlockState(
@@ -1058,9 +1243,9 @@ export function resolveActiveModelParts(
   blockModels?: Record<string, CompiledBlockDefinition>,
   resolvedStates?: Map<string, BlockState>
 ): AppliedModelRef[] {
-  const coordKey = `${voxel.x},${voxel.y},${voxel.z}`;
+  const key = coordKey(voxel.x, voxel.y, voxel.z);
   const effectiveState =
-    resolvedStates?.get(coordKey) ??
+    resolvedStates?.get(key) ??
     resolveEffectiveBlockState(voxel, def, voxelMap, blockModels, resolvedStates);
 
   if (def.multipart && def.multipart.length > 0) {
@@ -1076,63 +1261,7 @@ export function resolveActiveModelParts(
   }
 
   if (def.variants) {
-    const entries = Object.entries(def.variants);
-    if (entries.length === 0) return [];
-    if (entries.length === 1 && entries[0][0] === "") {
-      return entries[0][1];
-    }
-
-    const stateCopy: Record<string, string> = { ...effectiveState };
-    const usesType = hasVariantProp(def, "type");
-    const usesHalf = hasVariantProp(def, "half");
-    if (usesType && !("type" in stateCopy) && "half" in stateCopy) {
-      stateCopy.type = stateCopy.half;
-    }
-    if (usesHalf && !("half" in stateCopy) && "type" in stateCopy) {
-      stateCopy.half = stateCopy.type;
-    }
-
-    let bestRefs = entries[0][1];
-    let bestScore = -Infinity;
-
-    for (const [key, refs] of entries) {
-      if (key === "") {
-        if (0 > bestScore) {
-          bestScore = 0;
-          bestRefs = refs;
-        }
-        continue;
-      }
-
-      const pairs = key.split(",");
-      let score = 0;
-      let valid = true;
-
-      for (const pair of pairs) {
-        const eqIdx = pair.indexOf("=");
-        if (eqIdx === -1) continue;
-        const prop = pair.slice(0, eqIdx).trim().toLowerCase();
-        const val = pair.slice(eqIdx + 1).trim().toLowerCase();
-
-        if (prop in stateCopy) {
-          if (stateCopy[prop] === val) {
-            score += 100;
-          } else {
-            valid = false;
-            break;
-          }
-        } else if (getDefaultPropValue(def, prop) === val) {
-          score += 1;
-        }
-      }
-
-      if (valid && score > bestScore) {
-        bestScore = score;
-        bestRefs = refs;
-      }
-    }
-
-    return bestRefs;
+    return matchVariantModelRefs(effectiveState, def);
   }
 
   const firstModelKey = Object.keys(def.models)[0];

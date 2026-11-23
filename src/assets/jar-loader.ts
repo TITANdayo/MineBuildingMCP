@@ -3,6 +3,7 @@ import path from "node:path";
 import os from "node:os";
 import AdmZip from "adm-zip";
 import { PNG } from "pngjs";
+import { toShortBlockId } from "../core/block-name.js";
 import type {
   AppliedModelRef,
   CompiledBlockDefinition,
@@ -34,15 +35,7 @@ const ALL_FACE_DIRECTIONS: McFaceDirection[] = [
  * returning a clean lowercase identifier (e.g., "oak_stairs").
  */
 export function normalizeBlockName(blockName: string): string {
-  let clean = blockName.trim().toLowerCase();
-  if (clean.startsWith("minecraft:")) {
-    clean = clean.slice("minecraft:".length);
-  }
-  const bracketIdx = clean.indexOf("[");
-  if (bracketIdx !== -1) {
-    clean = clean.slice(0, bracketIdx);
-  }
-  return clean;
+  return toShortBlockId(blockName);
 }
 
 function normalizeModelRefName(modelRef: string): string {
@@ -125,9 +118,13 @@ function findJarFilesInVersionsDir(versionsDir: string): Array<{ jarPath: string
         for (const sub of subEntries) {
           if (sub.isFile() && sub.name.endsWith(".jar")) {
             const jarPath = path.join(fullPath, sub.name);
-            const stat = fs.statSync(jarPath);
-            if (stat.size > 1024 * 100) {
-              results.push({ jarPath, score: parseVersionScore(jarPath, stat.mtimeMs) });
+            try {
+              const stat = fs.statSync(jarPath);
+              if (stat.size > 1024 * 100) {
+                results.push({ jarPath, score: parseVersionScore(jarPath, stat.mtimeMs) });
+              }
+            } catch {
+              // Ignore unreadable jar files
             }
           }
         }
@@ -254,7 +251,7 @@ interface ProceduralStyle {
 }
 
 function resolveProceduralStyle(block: string, seed: number): ProceduralStyle {
-  if (block.includes("grass") || block.includes("moss") || block.includes(" turf")) {
+  if (block.includes("grass") || block.includes("moss") || block.includes("turf")) {
     return {
       baseRgb: [94, 168, 58],
       accentRgb: [72, 138, 42],
@@ -368,6 +365,12 @@ function resolveProceduralStyle(block: string, seed: number): ProceduralStyle {
     }
     if (block.includes("bamboo")) {
       return { baseRgb: [198, 178, 86], accentRgb: [170, 150, 66], alpha: 255, pattern: "planks" };
+    }
+    if (block.includes("jungle")) {
+      return { baseRgb: [160, 115, 80], accentRgb: [132, 92, 62], alpha: 255, pattern: "planks" };
+    }
+    if (block.includes("mangrove")) {
+      return { baseRgb: [120, 56, 50], accentRgb: [92, 40, 36], alpha: 255, pattern: "planks" };
     }
     return { baseRgb: [162, 130, 78], accentRgb: [134, 104, 58], alpha: 255, pattern: "planks" };
   }
@@ -691,6 +694,8 @@ interface ResolvedTextureAsset {
 interface ResolvedModelInfo {
   elements: ResolvedModelElement[];
   isFluid: boolean;
+  isFallback: boolean;
+  hasForcedTranslucent: boolean;
   primaryTextureKey: string | null;
 }
 
@@ -881,39 +886,42 @@ export class JarAssetLoader {
       return new Set();
     }
     visited.add(clean);
+    try {
+      const entry = this.jarBlockTagEntries.get(clean);
+      const members = new Set<string>();
+      if (!entry) {
+        this.resolvedTagMembersCache.set(clean, members);
+        return members;
+      }
 
-    const entry = this.jarBlockTagEntries.get(clean);
-    const members = new Set<string>();
-    if (!entry) {
+      try {
+        const parsed = JSON.parse(this.zip.readAsText(entry)) as RawBlockTagJson;
+        for (const rawVal of parsed.values ?? []) {
+          const id =
+            typeof rawVal === "string"
+              ? rawVal
+              : typeof rawVal?.id === "string"
+                ? rawVal.id
+                : null;
+          if (!id) continue;
+          const trimmed = id.trim();
+          if (trimmed.startsWith("#")) {
+            for (const sub of this.resolveBlockTag(trimmed, visited)) {
+              members.add(sub);
+            }
+          } else {
+            members.add(normalizeBlockName(trimmed));
+          }
+        }
+      } catch {
+        // Ignore malformed tag files
+      }
+
       this.resolvedTagMembersCache.set(clean, members);
       return members;
+    } finally {
+      visited.delete(clean);
     }
-
-    try {
-      const parsed = JSON.parse(this.zip.readAsText(entry)) as RawBlockTagJson;
-      for (const rawVal of parsed.values ?? []) {
-        const id =
-          typeof rawVal === "string"
-            ? rawVal
-            : typeof rawVal?.id === "string"
-              ? rawVal.id
-              : null;
-        if (!id) continue;
-        const trimmed = id.trim();
-        if (trimmed.startsWith("#")) {
-          for (const sub of this.resolveBlockTag(trimmed, visited)) {
-            members.add(sub);
-          }
-        } else {
-          members.add(normalizeBlockName(trimmed));
-        }
-      }
-    } catch {
-      // Ignore malformed tag files
-    }
-
-    this.resolvedTagMembersCache.set(clean, members);
-    return members;
   }
 
   private ensureBlockTagsIndex(): Map<string, string[]> {
@@ -1012,6 +1020,8 @@ export class JarAssetLoader {
           },
         ],
         isFluid: false,
+        isFallback: true,
+        hasForcedTranslucent: false,
         primaryTextureKey: cleanModel,
       };
       this.resolvedModelCache.set(cleanModel, fallbackInfo);
@@ -1027,13 +1037,18 @@ export class JarAssetLoader {
       }
     }
 
+    let hasForcedTranslucent = false;
+
     const resolveConcreteTexture = (val: unknown): string | null => {
       let cur: unknown = val;
       for (let i = 0; i < 16 && cur != null; i++) {
         if (typeof cur === "object") {
-          const sprite = (cur as { sprite?: unknown }).sprite;
-          if (typeof sprite === "string") {
-            cur = sprite;
+          const obj = cur as { sprite?: unknown; force_translucent?: unknown };
+          if (obj.force_translucent === true) {
+            hasForcedTranslucent = true;
+          }
+          if (typeof obj.sprite === "string") {
+            cur = obj.sprite;
           } else {
             return null;
           }
@@ -1089,6 +1104,8 @@ export class JarAssetLoader {
       const info: ResolvedModelInfo = {
         elements: [synthElement],
         isFluid,
+        isFallback: false,
+        hasForcedTranslucent,
         primaryTextureKey: textureKey,
       };
       this.resolvedModelCache.set(cleanModel, info);
@@ -1183,6 +1200,8 @@ export class JarAssetLoader {
     const info: ResolvedModelInfo = {
       elements: resolvedElements,
       isFluid: false,
+      isFallback: false,
+      hasForcedTranslucent,
       primaryTextureKey,
     };
     this.resolvedModelCache.set(cleanModel, info);
@@ -1358,7 +1377,7 @@ export class JarAssetLoader {
     const rawState = this.loadRawBlockstateJson(normalized);
     if (!rawState || (!rawState.variants && !rawState.multipart)) {
       const modelInfo = this.resolveBlockModel(normalized);
-      let hasTranslucent = modelInfo.isFluid;
+      let hasTranslucent = modelInfo.isFluid || modelInfo.hasForcedTranslucent;
       for (const el of modelInfo.elements) {
         for (const face of Object.values(el.faces)) {
           if (!face) continue;
@@ -1377,6 +1396,7 @@ export class JarAssetLoader {
           this.isFullCubeModelOpaque(modelInfo.elements),
         isFluid: modelInfo.isFluid,
         isTranslucent: modelInfo.isFluid || hasTranslucent,
+        ...(modelInfo.isFallback ? { isFallback: true } : {}),
       };
       this.blockDefCache.set(normalized, def);
       return def;
@@ -1421,6 +1441,9 @@ export class JarAssetLoader {
       models[modelKey] = info.elements;
       if (info.isFluid) {
         isFluid = true;
+      }
+      if (info.hasForcedTranslucent) {
+        hasTranslucentAlpha = true;
       }
       for (const el of info.elements) {
         for (const face of Object.values(el.faces)) {
