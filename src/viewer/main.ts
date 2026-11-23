@@ -106,6 +106,11 @@ class MineBuildingViewer {
   private interactiveCutawayPickerGeometry: THREE.BufferGeometry | null = null;
   private cutawayEnabled = false;
   private cutawayY = 6;
+  private autoRotateEnabled = false;
+  private autoRotateSpeed = 2.0;
+  private autoRotateDirection: 1 | -1 = 1;
+  private hudHidden = false;
+  private lastFrameTimeMs = performance.now();
 
   private currentVoxels: VoxelData[] = [];
   private currentTextures?: Record<string, string>;
@@ -197,6 +202,7 @@ class MineBuildingViewer {
 
     this.updateGridHelper([32, 32, 32]);
     this.bindEvents();
+    this.applyInitialUrlOptions();
     const isHeadless =
       new URLSearchParams(window.location.search).get("client") === "headless";
     if (!isHeadless) {
@@ -204,6 +210,7 @@ class MineBuildingViewer {
     }
     this.connectWebSocket();
     if (!isHeadless) {
+      this.lastFrameTimeMs = performance.now();
       this.animate();
     }
   }
@@ -1482,6 +1489,52 @@ class MineBuildingViewer {
       });
     }
 
+    // Auto Rotate toggle, direction & speed slider
+    const autoRotateToggleBtn = document.getElementById("autorotate-toggle-btn");
+    const autoRotateDirBtn = document.getElementById("autorotate-dir-btn");
+    const autoRotateSlider = document.getElementById(
+      "autorotate-speed-slider"
+    ) as HTMLInputElement | null;
+
+    if (autoRotateToggleBtn) {
+      autoRotateToggleBtn.addEventListener("click", () => {
+        this.setAutoRotate(!this.autoRotateEnabled);
+      });
+    }
+
+    if (autoRotateDirBtn) {
+      autoRotateDirBtn.addEventListener("click", () => {
+        const nextDir: 1 | -1 = this.autoRotateDirection === 1 ? -1 : 1;
+        this.setAutoRotate(this.autoRotateEnabled, this.autoRotateSpeed, nextDir);
+      });
+    }
+
+    if (autoRotateSlider) {
+      autoRotateSlider.addEventListener("input", () => {
+        const speed = Number(autoRotateSlider.value);
+        this.setAutoRotate(true, speed, this.autoRotateDirection);
+      });
+    }
+
+    window.addEventListener("keydown", (e) => {
+      const target = e.target as HTMLElement | null;
+      if (
+        target &&
+        (target.tagName === "INPUT" ||
+          target.tagName === "TEXTAREA" ||
+          target.isContentEditable)
+      ) {
+        return;
+      }
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      const key = e.key.toLowerCase();
+      if (key === "r") {
+        this.setAutoRotate(!this.autoRotateEnabled);
+      } else if (key === "h") {
+        this.setHudVisible(this.hudHidden);
+      }
+    });
+
     // Interactive click-to-inspect voxel in browser
     const domElem = this.renderer.domElement;
     domElem.addEventListener("pointerdown", (e) => {
@@ -1692,10 +1745,151 @@ class MineBuildingViewer {
     }
   }
 
+  private applyInitialUrlOptions(): void {
+    const params = new URLSearchParams(window.location.search);
+    const hudParam = params.get("hud");
+    if (hudParam === "0" || hudParam === "false") {
+      this.setHudVisible(false);
+    }
+
+    const speedParam = params.get("autoRotateSpeed");
+    let initialSpeed = this.autoRotateSpeed;
+    let initialDir: 1 | -1 = this.autoRotateDirection;
+    if (speedParam !== null) {
+      const parsed = Number(speedParam);
+      if (Number.isFinite(parsed) && parsed !== 0) {
+        initialDir = parsed < 0 ? -1 : 1;
+        initialSpeed = clamp(Math.abs(parsed), 0.2, 12.0);
+      }
+    }
+
+    const autoRotateParam = params.get("autoRotate");
+    const enabled = autoRotateParam === "1" || autoRotateParam === "true";
+    this.setAutoRotate(enabled, initialSpeed, initialDir);
+  }
+
+  public setHudVisible(visible: boolean): void {
+    this.hudHidden = !visible;
+    const hudEl = document.querySelector<HTMLElement>(".hud-layer");
+    if (hudEl) {
+      hudEl.classList.toggle("hud-hidden", this.hudHidden);
+    }
+  }
+
+  public setAutoRotate(
+    enabled: boolean,
+    speed?: number,
+    direction?: 1 | -1
+  ): void {
+    this.autoRotateEnabled = Boolean(enabled);
+    if (typeof speed === "number" && Number.isFinite(speed) && speed > 0) {
+      this.autoRotateSpeed = clamp(speed, 0.2, 12.0);
+    }
+    if (direction === 1 || direction === -1) {
+      this.autoRotateDirection = direction;
+    }
+
+    if (this.autoRotateEnabled && this.activeViewMode !== "free") {
+      this.activeViewMode = "free";
+      this.activeCamera = this.orbitCamera;
+      this.controls.enabled = true;
+      const buttons = document.querySelectorAll<HTMLButtonElement>(".view-btn");
+      buttons.forEach((b) => {
+        b.classList.toggle("active", b.dataset.view === "free");
+      });
+      const labelEl = document.getElementById("active-camera-label");
+      if (labelEl) labelEl.textContent = "Free Orbit";
+    }
+
+    this.controls.autoRotate = this.autoRotateEnabled;
+    this.controls.autoRotateSpeed =
+      this.autoRotateSpeed * this.autoRotateDirection;
+
+    const toggleBtn = document.getElementById("autorotate-toggle-btn");
+    const dirBtn = document.getElementById("autorotate-dir-btn");
+    const speedLabel = document.getElementById("autorotate-speed-label");
+    const speedSlider = document.getElementById(
+      "autorotate-speed-slider"
+    ) as HTMLInputElement | null;
+
+    if (toggleBtn) {
+      toggleBtn.classList.toggle("active", this.autoRotateEnabled);
+      toggleBtn.textContent = this.autoRotateEnabled
+        ? "Rotate: ON"
+        : "Rotate: OFF";
+    }
+    if (dirBtn) {
+      dirBtn.textContent = this.autoRotateDirection === 1 ? "↻" : "↺";
+    }
+    if (speedLabel) {
+      speedLabel.textContent = this.autoRotateEnabled
+        ? `${this.autoRotateSpeed.toFixed(1)}x ${this.autoRotateDirection === 1 ? "CW" : "CCW"}`
+        : "OFF";
+    }
+    if (speedSlider) {
+      speedSlider.value = String(
+        clamp(this.autoRotateSpeed, Number(speedSlider.min), Number(speedSlider.max))
+      );
+    }
+  }
+
+  public getAutoRotateState(): {
+    enabled: boolean;
+    speed: number;
+    direction: 1 | -1;
+  } {
+    return {
+      enabled: this.autoRotateEnabled,
+      speed: this.autoRotateSpeed,
+      direction: this.autoRotateDirection
+    };
+  }
+
+  public setOrbitCameraSpherical(
+    target: Vec3,
+    yawDeg: number,
+    pitchDeg: number,
+    distance: number,
+    fov = 45
+  ): void {
+    const pos = computePositionFromSpherical(target, yawDeg, pitchDeg, distance);
+    const maxSpan = Math.max(
+      this.worldBounds.size.x,
+      this.worldBounds.size.y,
+      this.worldBounds.size.z,
+      8
+    );
+    this.orbitCamera.fov = clamp(fov, 10, 120);
+    this.orbitCamera.zoom = 1;
+    this.orbitCamera.near = Math.max(0.05, Math.min(0.5, distance * 0.01));
+    this.orbitCamera.far = Math.max(1000, distance * 10 + maxSpan * 8);
+    this.orbitCamera.position.set(pos.x, pos.y, pos.z);
+    this.orbitCamera.updateProjectionMatrix();
+
+    this.controls.target.set(target.x, target.y, target.z);
+    this.activeViewMode = "free";
+    this.activeCamera = this.orbitCamera;
+    this.controls.enabled = true;
+    const prevDamping = this.controls.enableDamping;
+    const prevAutoRotate = this.controls.autoRotate;
+    this.controls.enableDamping = false;
+    this.controls.autoRotate = false;
+    this.controls.update();
+    this.controls.enableDamping = prevDamping;
+    this.controls.autoRotate = prevAutoRotate;
+    this.renderer.render(this.scene, this.activeCamera);
+  }
+
   private animate = (): void => {
     requestAnimationFrame(this.animate);
+    const now = performance.now();
+    const deltaSec = Math.min(
+      0.1,
+      Math.max(0.001, (now - this.lastFrameTimeMs) / 1000)
+    );
+    this.lastFrameTimeMs = now;
     if (this.activeViewMode === "free") {
-      this.controls.update();
+      this.controls.update(deltaSec);
     }
     this.renderer.render(this.scene, this.activeCamera);
   };

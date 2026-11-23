@@ -51,9 +51,9 @@ description: >-
    - [geometry_helpers.js](./scripts/geometry_helpers.js) を共通基盤とし、フェーズ別 `.js` に分割。体積物は `buildHollowVolumeShell`（6近傍BFS＋26近傍表面抽出）、斜材は `drawStrut`（マンハッタン6連結）、安全配置は `pSet`/`fSet`＋`placeChainSafe`/`placeLanternSafe`/`placeHangingVineSafe` を使う。
 4. **ローカル事前検証（`dry_run`、2–6秒）**：
    - MCP を叩く前に必ず [dry_run_validator.mjs](./scripts/dry_run_validator.mjs) を実行し、**`OOB: 0`・SafeBox OK・総ブロック予算内・Topブロック偏りなし・浮遊クラスタ0（空中建築は `--emit-anchors` でアンカー化）・`Lint Issues: 0`** を通す。
-5. **段階ビルド・チェックポイント・Linter 確定**：
+5. **段階ビルド・チェックポイント・Linter 確定＆ライブビューア同期**：
    - `load_terrain` → フェーズごとに `run_build_script(resetBeforeRun: false)` → 各フェーズ末に `export_structure` で `checkpoints/phaseN.nbt` を保存＆ `render_camera` でプロポーション確認。全フェーズ後に `lint_structure` 警告 **0件**を確認。
-   - 複数ステージや大量カメラ一括出力には [batch_render.mjs](./scripts/batch_render.mjs)（`--require-jar` 推奨）を活用する。
+   - 複数ステージや大量カメラ一括出力には [batch_render.mjs](./scripts/batch_render.mjs)（`--require-jar` 推奨）を活用する。ただし `batch_render.mjs` は専用ヘッドレスポートで実行されるため、**主要な節目および最終完了時には必ず稼働中のライブ MCP へ `load_terrain`（チェックポイント `.nbt`）＋ `open_viewer` ＋ `render_camera(syncViewer: true)` を実行し、ユーザーのブラウザへ最新モデルを同期表示する**。
 6. **マルチアングル視覚検証＆ `inspect_pixel` 修正ループ**：
    - 最低4視点の透視投影（`resolution: 768`）を撮影：**①主斜め俯瞰（エッジオン回避）、②反対側 `yaw+180°` リバース俯瞰、③前景越し／低仰角視点、④建築ディテール超近接**（内装ありなら `inspect_interior` に明示 `cutY` を指定）。
    - 違和感箇所は `inspect_pixel(view="custom", u, v)` で3D座標とステートを特定し修正。**パッチ修正は必ず元フェーズファイルへバックポート**して再 `dry_run` 後に最終 `.nbt`（必要時 `.mcstructure`）を出力する。

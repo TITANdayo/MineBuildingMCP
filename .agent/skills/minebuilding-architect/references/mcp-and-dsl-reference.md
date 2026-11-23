@@ -105,5 +105,5 @@
 - **テスト＆動画録画の注意**：
   - `MineBuildingMCP` のテストは並列 Chromium 起動でタイムアウトしやすいため `npx vitest run --fileParallelism=false`。
   - `tsx` 下で Playwright の `page.evaluate(fn)` に関数を渡すと `esbuild keepNames` の `__name` 注入で `ReferenceError: __name is not defined` になるため文字列で渡す。
-  - プログラム起動の `MineBuildingMcpServer`（`scripts/batch_render.mjs`）は稼働中 MCP サーバー（`3001`/`5173`）と競合しない専用ポート（既定 `wsPort=3088`, `vitePort=5188`）を使う。
-  - Playwright 録画では SwiftShader を外し `['--use-gl=angle', '--enable-webgl', '--ignore-gpu-blocklist', '--no-sandbox']` を試すとネイティブ GPU で 10倍以上高速（失敗時のみ SwiftShader フォールバック）。
+  - プログラム起動の `MineBuildingMcpServer`（`scripts/batch_render.mjs`）は稼働中 MCP サーバー（`3001`/`5173`）と競合しない専用ポート（既定 `wsPort=3088`, `vitePort=5188`, `openViewer: false`）で完結するため、ユーザーのブラウザへ自動反映されない（前セッションの古いタブは切断状態のまま残る）。`batch_render.mjs` 併用時は節目・完了時にライブ MCP の `load_terrain(checkpointNbt)` → `open_viewer` → `render_camera(syncViewer: true)` で必ずライブ 3D ビューアへ同期する。
+  - 3D ビューアの Auto-Rotate（HUD トグル＋速度スライダー、ショートカット `R`、HUD 非表示 `H`、URL クエリ `?autoRotate=1&autoRotateSpeed=1.2&hud=0`）および `window.__mineBuildingViewer` でターンテーブル鑑賞・シームレス 360° 録画が可能。Playwright 録画では SwiftShader を外し `['--use-gl=angle', '--enable-webgl', '--ignore-gpu-blocklist', '--no-sandbox']` を試すとネイティブ GPU で 10倍以上高速（失敗時のみ SwiftShader フォールバック）。

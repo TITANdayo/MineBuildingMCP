@@ -15,7 +15,7 @@ MineBuildingMCP/
 ├── package.json
 ├── tsconfig.json
 ├── vite.config.ts
-├── index.html                           # Three.js ビューア用エントリー (デバッグHUD・Cutawayスライダー付き)
+├── index.html                           # Three.js ビューア用エントリー (デバッグHUD・Cutaway・Auto-Rotate付き)
 ├── .agent/
 │   └── skills/
 │       └── minebuilding-architect/      # Antigravity等向け 再利用可能Minecraft建築スキル一式
@@ -31,10 +31,11 @@ MineBuildingMCP/
 │               └── batch_render.mjs           # 固定マルチアングル透視レンダリング・Lint・エクスポートCLI
 ├── samples/
 │   ├── sloped_river_terrain.nbt         # 32x32x32 サンプル斜面＆河川地形
-│   └── british_bridge_terrain.nbt       # サンプル橋梁用地形
+│   ├── spiral_aqua_dragon_palace.nbt    # 254x252x254 大規模サンプル『竜宮の螺旋浮島と水流龍』(約190kブロック)
+│   └── spiral_aqua_dragon_palace/       # 上記サンプルのモジュール化DSLスクリプト・アンカーキャンバス・カメラ定義
 ├── scripts/
 │   ├── generate-sample-terrain.ts       # 32x32x32 テスト用地形(.nbt)生成スクリプト
-│   └── build-british-bridge.ts          # サンプル橋梁ビルドスクリプト
+│   └── build-spiral-aqua-dragon-palace.ts # 『竜宮の螺旋浮島と水流龍』サンプル再構築スクリプト
 ├── src/
 │   ├── types/
 │   │   └── shared.ts                    # 全モジュール共通のインターフェース・WebSocketプロトコル定義
@@ -54,9 +55,10 @@ MineBuildingMCP/
 │   └── mcp/                             # MCPサーバー・WebSocketブリッジ・Headlessブラウザ制御
 │       ├── server.ts
 │       └── ws-bridge.ts
-└── tests/                               # Vitest テストスイート（全4ファイル・40テスト）
+└── tests/                               # Vitest テストスイート（全5ファイル・50テスト）
     ├── e2e.test.ts
     ├── unit-fixes.test.ts
+    ├── refactoring-regressions.test.ts
     ├── structure-linter.test.ts
     └── data-driven-models.test.ts
 ```

@@ -107,3 +107,5 @@
 | `chain`（旧ID）やサンドボックス内 `jarFound=false` 描画 | 鎖がただの箱・ガラスが不透明キューブに化ける | `minecraft:iron_chain` を使用し、実 JAR 接続（`jarFound=true`）を必ず確認 |
 | 横向き鎖への縦鎖／ランタン直結、非フルブロックへのツタ | `lint_structure` で `axis_mismatch_junction` / `missing_support` | `placeChainSafe` / `placeLanternSafe` / `placeHangingVineSafe` ＋中継ブロック徹底 |
 | 空中建築で未アンカーのまま構造検証を実行 | 意図した浮遊クラスタが大量の `floatingBlocksCount`・構造警告ノイズとして報告される（`lint_structure` 自体は100件上限で安全終了） | 事前に `dry_run_validator.mjs --emit-anchors` でクラスタ別の元ブロックID・ステートを忠実継承した `isTerrain=true` アンカー `.nbt` を生成し `floatingBlocks: 0` にする |
+| 屋根四隅の 2×2 金塊コブ／有機彫刻の不釣り合いな付属肢 | 近景でレゴ塊感やアンバランスな突起が主シルエットを損なう | 軒先アクセントは 1 ブロック先端へ絞り、主シルエットを乱す不自然な付属肢は無理に残さず引き算で削除する |
+| 滝下端の平皿雲（UFO 盤）／厚切り垂直ガラス壁の雲帯 | 虚空に浮く逆さキノコや分厚いゼリー塊に見えて不自然 | 滝は自然な雲帯へ流入または先細りさせ、雲外縁は水平距離に応じ垂直厚を 1 ブロックへ強制テーパーさせる |

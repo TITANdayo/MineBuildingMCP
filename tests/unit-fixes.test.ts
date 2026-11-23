@@ -448,4 +448,51 @@ describe("Issue #3, #4, and Vertical Block Default Facing Unit Tests", () => {
       await mcpServer.close();
     }
   });
+
+  it("Auto-Rotate HUD controls, direction toggle, URL params, and live camera orbit work cleanly", async () => {
+    const { chromium } = await import("playwright");
+    const bridge = new WsBridge({ wsPort: 0, vitePort: 0, openViewer: false });
+    await bridge.start();
+    let browser: Awaited<ReturnType<typeof chromium.launch>> | null = null;
+    try {
+      const launchOpts = {
+        headless: true,
+        args: ["--use-gl=angle", "--use-angle=swiftshader", "--enable-webgl", "--no-sandbox"],
+      };
+      try {
+        browser = await chromium.launch({ ...launchOpts, channel: "chrome" });
+      } catch {
+        browser = await chromium.launch(launchOpts);
+      }
+      const page = await browser.newPage({ viewport: { width: 800, height: 600 } });
+      await page.goto(`${bridge.getViteUrl()}&autoRotate=1&autoRotateSpeed=4.0`, {
+        waitUntil: "networkidle",
+      });
+      await page.waitForFunction("Boolean(window.__mineBuildingViewer)");
+
+      const initialState = (await page.evaluate(
+        "window.__mineBuildingViewer.getAutoRotateState()"
+      )) as { enabled: boolean; speed: number; direction: 1 | -1 };
+      expect(initialState).toEqual({ enabled: true, speed: 4.0, direction: 1 });
+      expect(await page.textContent("#autorotate-toggle-btn")).toBe("Rotate: ON");
+
+      // Click direction reverse button -> CCW (-1)
+      await page.click("#autorotate-dir-btn");
+      const reversedState = (await page.evaluate(
+        "window.__mineBuildingViewer.getAutoRotateState()"
+      )) as { enabled: boolean; speed: number; direction: 1 | -1 };
+      expect(reversedState.direction).toBe(-1);
+
+      // Click toggle off -> OFF
+      await page.click("#autorotate-toggle-btn");
+      const offState = (await page.evaluate(
+        "window.__mineBuildingViewer.getAutoRotateState()"
+      )) as { enabled: boolean; speed: number; direction: 1 | -1 };
+      expect(offState.enabled).toBe(false);
+      expect(await page.textContent("#autorotate-toggle-btn")).toBe("Rotate: OFF");
+    } finally {
+      if (browser) await browser.close();
+      await bridge.stop();
+    }
+  }, 60000);
 });

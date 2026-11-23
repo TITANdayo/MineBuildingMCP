@@ -70,6 +70,16 @@
         flex-direction: column;
         justify-content: space-between;
         padding: 16px;
+        transition: opacity 0.2s ease;
+      }
+
+      .hud-layer.hud-hidden {
+        opacity: 0;
+      }
+
+      .hud-layer.hud-hidden .panel,
+      .hud-layer.hud-hidden .hint-box {
+        pointer-events: none;
       }
 
       .hud-top {
@@ -289,6 +299,50 @@
         cursor: pointer;
       }
 
+      .autorotate-controls {
+        margin-top: 6px;
+        padding-top: 8px;
+        border-top: 1px solid var(--border-color);
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+      }
+
+      .autorotate-toggle-btn,
+      .autorotate-dir-btn {
+        appearance: none;
+        background: var(--bg-subtle);
+        color: var(--text-secondary);
+        border: 1px solid var(--border-color);
+        border-radius: 7px;
+        padding: 5px 10px;
+        font-size: 11px;
+        font-weight: 600;
+        font-family: var(--font-mono);
+        cursor: pointer;
+        transition: all 0.15s ease;
+        white-space: nowrap;
+      }
+
+      .autorotate-toggle-btn:hover,
+      .autorotate-dir-btn:hover {
+        color: var(--text-primary);
+        border-color: rgba(56, 189, 248, 0.5);
+      }
+
+      .autorotate-toggle-btn.active {
+        color: #0b0f17;
+        background: var(--accent-blue);
+        border-color: var(--accent-blue);
+        box-shadow: 0 0 12px rgba(56, 189, 248, 0.35);
+      }
+
+      .autorotate-slider {
+        flex: 1;
+        accent-color: var(--accent-blue);
+        cursor: pointer;
+      }
+
       /* Inspector Panel */
       .inspector-panel {
         width: 380px;
@@ -436,12 +490,23 @@
               <input id="cutaway-y-slider" class="cutaway-slider" type="range" min="0" max="32" step="1" value="6" />
             </div>
           </div>
+          <div class="autorotate-controls">
+            <div class="panel-header">
+              <span>Auto Rotate</span>
+              <span id="autorotate-speed-label" style="font-family: var(--font-mono); color: var(--accent-blue)">OFF</span>
+            </div>
+            <div class="cutaway-row">
+              <button id="autorotate-toggle-btn" class="autorotate-toggle-btn" type="button" title="Toggle Auto Rotate (R)">Rotate: OFF</button>
+              <button id="autorotate-dir-btn" class="autorotate-dir-btn" type="button" title="Reverse Rotation Direction">↻</button>
+              <input id="autorotate-speed-slider" class="autorotate-slider" type="range" min="0.5" max="8.0" step="0.5" value="2.0" />
+            </div>
+          </div>
         </div>
       </div>
 
       <div class="hud-bottom">
         <div class="hint-box">
-          Left-click any block to inspect coordinates &amp; trace &bull; Drag to orbit &bull; Scroll to zoom
+          Left-click to inspect &bull; Drag to orbit &bull; Scroll to zoom &bull; R: Auto Rotate &bull; H: Toggle HUD
         </div>
 
         <!-- Voxel & AI Inspector -->

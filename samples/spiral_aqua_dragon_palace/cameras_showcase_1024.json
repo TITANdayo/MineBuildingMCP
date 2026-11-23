@@ -1,0 +1,80 @@
+[
+  {
+    "id": "hero_01_master_se_1024",
+    "params": {
+      "projection": "perspective",
+      "target": { "x": 128, "y": 123, "z": 127 },
+      "yaw": 150,
+      "pitch": 16,
+      "distance": 300,
+      "fov": 47,
+      "resolution": 1024,
+      "syncViewer": false
+    }
+  },
+  {
+    "id": "hero_02_low_dramatic_1024",
+    "params": {
+      "projection": "perspective",
+      "target": { "x": 128, "y": 126, "z": 127 },
+      "yaw": 162,
+      "pitch": -4,
+      "distance": 252,
+      "fov": 50,
+      "resolution": 1024,
+      "syncViewer": false
+    }
+  },
+  {
+    "id": "hero_03_reverse_nw_1024",
+    "params": {
+      "projection": "perspective",
+      "target": { "x": 127, "y": 122, "z": 127 },
+      "yaw": 322,
+      "pitch": 18,
+      "distance": 298,
+      "fov": 47,
+      "resolution": 1024,
+      "syncViewer": false
+    }
+  },
+  {
+    "id": "hero_04_dragon_head_claws_1024",
+    "params": {
+      "projection": "perspective",
+      "target": { "x": 171, "y": 196, "z": 145 },
+      "yaw": 152,
+      "pitch": 5,
+      "distance": 54,
+      "fov": 45,
+      "resolution": 1024,
+      "syncViewer": false
+    }
+  },
+  {
+    "id": "hero_05_zenith_palace_1024",
+    "params": {
+      "projection": "perspective",
+      "target": { "x": 118, "y": 202, "z": 108 },
+      "yaw": 148,
+      "pitch": 16,
+      "distance": 66,
+      "fov": 44,
+      "resolution": 1024,
+      "syncViewer": false
+    }
+  },
+  {
+    "id": "hero_06_sea_gate_vortex_1024",
+    "params": {
+      "projection": "perspective",
+      "target": { "x": 127, "y": 42, "z": 172 },
+      "yaw": 152,
+      "pitch": 14,
+      "distance": 86,
+      "fov": 46,
+      "resolution": 1024,
+      "syncViewer": false
+    }
+  }
+]
