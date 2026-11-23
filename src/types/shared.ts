@@ -55,6 +55,8 @@ export interface CompiledBlockDefinition {
   isFullOpaqueCube: boolean;
   isFluid: boolean;
   isTranslucent: boolean;
+  /** True when synthesized as a generic fallback because no JAR blockstate/model was found. */
+  isFallback?: boolean;
 }
 
 export interface VoxelData {
@@ -314,4 +316,5 @@ export type WsResponse =
       image: string;
       camera: CameraStateSnapshot;
     }
-  | { type: "INSPECT_RESULT"; id: string; data: InspectResult };
+  | { type: "INSPECT_RESULT"; id: string; data: InspectResult }
+  | { type: "ERROR"; id: string; message: string };

@@ -1,5 +1,6 @@
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
+import { clampResolution } from "../core/block-name.js";
 import type {
   CameraControlParams,
   CameraPreset,
@@ -22,7 +23,12 @@ import {
   filterVoxelsForCutaway,
   type BuiltWorldMeshes
 } from "./voxel-mesh.js";
-import { OffscreenPickerPass } from "./picker-pass.js";
+import {
+  decodePickerAlphaByte,
+  OffscreenPickerPass
+} from "./picker-pass.js";
+
+declare const __MINEBUILDING_WS_PORT__: number | undefined;
 
 const VIEW_DIRECTIONS: ViewDirection[] = ["NE", "SE", "SW", "NW"];
 const CARDINAL_DIRECTIONS: CardinalDirection[] = ["N", "S", "E", "W"];
@@ -89,7 +95,7 @@ class MineBuildingViewer {
   private scene: THREE.Scene;
   private ambientLight: THREE.AmbientLight;
   private orbitCamera: THREE.PerspectiveCamera;
-  private customOrthoCamera: THREE.OrthographicCamera | null = null;
+  private customCamera: THREE.Camera | null = null;
   private activeCamera: THREE.Camera;
   private activeViewMode: "free" | ViewDirection | "custom" = "free";
   private controls: OrbitControls;
@@ -134,6 +140,7 @@ class MineBuildingViewer {
   };
 
   private ws: WebSocket | null = null;
+  private reconnectTimer: number | null = null;
   private wsQueue: Promise<void> = Promise.resolve();
   private raycaster = new THREE.Raycaster();
   private pointerDownPos = new THREE.Vector2();
@@ -230,7 +237,9 @@ class MineBuildingViewer {
     const fillMesh = new THREE.Mesh(boxGeo, fillMat);
     group.add(fillMesh);
 
-    const edgesGeo = new THREE.EdgesGeometry(new THREE.BoxGeometry(1.06, 1.06, 1.06));
+    const edgeBox = new THREE.BoxGeometry(1.06, 1.06, 1.06);
+    const edgesGeo = new THREE.EdgesGeometry(edgeBox);
+    edgeBox.dispose();
     const lineMat = new THREE.LineBasicMaterial({
       color: 0xff3b3b,
       linewidth: 2
@@ -254,6 +263,11 @@ class MineBuildingViewer {
     if (this.gridHelper) {
       this.scene.remove(this.gridHelper);
       this.gridHelper.geometry.dispose();
+      if (Array.isArray(this.gridHelper.material)) {
+        for (const mat of this.gridHelper.material) mat.dispose();
+      } else {
+        this.gridHelper.material.dispose();
+      }
     }
     const maxDim = Math.max(size[0], size[2], 16);
     const grid = new THREE.GridHelper(maxDim, maxDim, 0x38bdf8, 0x1e293b);
@@ -540,10 +554,7 @@ class MineBuildingViewer {
       typeof params.resolution === "number" &&
       Number.isFinite(params.resolution)
     ) {
-      activeState.resolution = Math.max(
-        64,
-        Math.min(2048, Math.floor(params.resolution))
-      );
+      activeState.resolution = clampResolution(params.resolution);
     }
 
     if (
@@ -588,7 +599,8 @@ class MineBuildingViewer {
       const dx = pos.x - activeState.target.x;
       const dy = pos.y - activeState.target.y;
       const dz = pos.z - activeState.target.z;
-      const dist = Math.max(0.5, Math.hypot(dx, dy, dz));
+      const rawDist = Math.hypot(dx, dy, dz);
+      const dist = Math.max(0.5, rawDist);
       const horiz = Math.hypot(dx, dz);
 
       activeState.distance = dist;
@@ -601,7 +613,7 @@ class MineBuildingViewer {
         activeState.yaw = wrapYaw((Math.atan2(dx, -dz) * 180) / Math.PI);
       }
 
-      if (hasRelativeAngleOrDist) {
+      if (hasRelativeAngleOrDist || rawDist < 1e-4) {
         if (typeof params.deltaYaw === "number" && Number.isFinite(params.deltaYaw)) {
           activeState.yaw = wrapYaw(activeState.yaw + params.deltaYaw);
         }
@@ -713,7 +725,8 @@ class MineBuildingViewer {
     size: [number, number, number],
     traces?: Record<number, TraceRecord>,
     textures?: Record<string, string>,
-    blockModels?: Record<string, CompiledBlockDefinition>
+    blockModels?: Record<string, CompiledBlockDefinition>,
+    isPreview = false
   ): Promise<void> {
     const gen = ++this.syncGeneration;
     this.cutawayGeneration++;
@@ -730,7 +743,9 @@ class MineBuildingViewer {
       this.worldSize[0] !== size[0] ||
       this.worldSize[1] !== size[1] ||
       this.worldSize[2] !== size[2];
-    this.hasSyncedWorldOnce = true;
+    if (!isPreview) {
+      this.hasSyncedWorldOnce = true;
+    }
 
     this.worldSize = size;
     this.currentVoxels = voxels;
@@ -752,6 +767,7 @@ class MineBuildingViewer {
       this.interactiveCutawayPickerGeometry.dispose();
       this.interactiveCutawayPickerGeometry = null;
     }
+    const prevFullPickerGeometry = this.fullPickerGeometry;
 
     this.visualGroup = built.visualGroup;
     this.fullPickerGeometry = built.pickerGeometry;
@@ -759,6 +775,9 @@ class MineBuildingViewer {
     this.scene.add(this.visualGroup);
 
     this.pickerPass.setWorldData(built.pickerGeometry, voxels, traces);
+    if (prevFullPickerGeometry && prevFullPickerGeometry !== built.pickerGeometry) {
+      prevFullPickerGeometry.dispose();
+    }
 
     // Update Cutaway slider bounds based on current world Y span
     const minY = Math.floor(this.worldBounds.min.y);
@@ -780,10 +799,7 @@ class MineBuildingViewer {
     if (sizeChanged) {
       this.customCameraInitialized = false;
       this.customCameraHasExplicitPosition = false;
-    }
-
-    if (sizeChanged || !this.customCameraInitialized) {
-      // Frame orbit camera nicely around updated world center
+      // Frame orbit camera nicely around updated world center (preserves user's interactive angle across same-size rebuilds)
       this.controls.target.copy(this.worldBounds.center);
       const span = Math.max(
         this.worldBounds.size.x,
@@ -803,11 +819,11 @@ class MineBuildingViewer {
 
     if (this.activeViewMode === "custom") {
       const aspect = window.innerWidth / Math.max(1, window.innerHeight);
-      this.customOrthoCamera = this.buildCustomCamera(
+      this.customCamera = this.buildCustomCamera(
         aspect,
         this.customCameraHasExplicitPosition
-      ) as THREE.OrthographicCamera;
-      this.activeCamera = this.customOrthoCamera;
+      );
+      this.activeCamera = this.customCamera;
     } else if (this.activeViewMode !== "free") {
       const aspect = window.innerWidth / Math.max(1, window.innerHeight);
       this.activeCamera = this.createDirectionCamera(this.activeViewMode, aspect);
@@ -900,40 +916,40 @@ class MineBuildingViewer {
       ? (this.interactiveCutawayGroup ? this.interactiveCutawayGroup.visible : false)
       : false;
 
-    if (ownsResources) {
-      this.debugMarkerGroup.visible = false;
-      if (this.visualGroup) this.visualGroup.visible = true;
-      if (this.interactiveCutawayGroup) this.interactiveCutawayGroup.visible = false;
-    }
-
-    this.renderer.setRenderTarget(visualTarget);
-    this.renderer.setClearColor(new THREE.Color(0x0f172a), 1.0);
-    this.renderer.clear(true, true, false);
-    this.renderer.render(this.scene, cam);
-
-    const dataUrl = this.readTargetToDataUrl(
-      visualTarget,
-      res,
-      rawPixels,
-      ctx,
-      imgData,
-      outCanvas
-    );
-
-    if (ownsResources) {
-      visualTarget.dispose();
-      this.debugMarkerGroup.visible = prevMarkerVisible;
-      if (this.visualGroup) this.visualGroup.visible = prevFullVisible;
-      if (this.interactiveCutawayGroup) {
-        this.interactiveCutawayGroup.visible = prevCutawayVisible;
+    try {
+      if (ownsResources) {
+        this.debugMarkerGroup.visible = false;
+        if (this.visualGroup) this.visualGroup.visible = true;
+        if (this.interactiveCutawayGroup) this.interactiveCutawayGroup.visible = false;
       }
-      this.renderer.setRenderTarget(prevTarget);
-      if (prevClearColor) {
-        this.renderer.setClearColor(prevClearColor, prevClearAlpha);
+
+      this.renderer.setRenderTarget(visualTarget);
+      this.renderer.setClearColor(new THREE.Color(0x0f172a), 1.0);
+      this.renderer.clear(true, true, false);
+      this.renderer.render(this.scene, cam);
+
+      return this.readTargetToDataUrl(
+        visualTarget,
+        res,
+        rawPixels,
+        ctx,
+        imgData,
+        outCanvas
+      );
+    } finally {
+      if (ownsResources) {
+        visualTarget.dispose();
+        this.debugMarkerGroup.visible = prevMarkerVisible;
+        if (this.visualGroup) this.visualGroup.visible = prevFullVisible;
+        if (this.interactiveCutawayGroup) {
+          this.interactiveCutawayGroup.visible = prevCutawayVisible;
+        }
+        this.renderer.setRenderTarget(prevTarget);
+        if (prevClearColor) {
+          this.renderer.setClearColor(prevClearColor, prevClearAlpha);
+        }
       }
     }
-
-    return dataUrl;
   }
 
   /**
@@ -942,7 +958,7 @@ class MineBuildingViewer {
    * 2. Data Picking Pass -> Cached RGBA8 Uint8Array buffers for <1ms INSPECT_PIXEL lookups
    */
   public renderViews(resolution: number): Record<ViewDirection, string> {
-    const res = Math.max(64, Math.min(2048, Math.floor(resolution || 512)));
+    const res = clampResolution(resolution, 512);
 
     const visualTarget = new THREE.WebGLRenderTarget(res, res, {
       minFilter: THREE.LinearFilter,
@@ -963,41 +979,43 @@ class MineBuildingViewer {
       ? this.interactiveCutawayGroup.visible
       : false;
 
-    // Ensure full exterior mesh is visible for exterior RENDER_VIEWS
-    this.debugMarkerGroup.visible = false;
-    if (this.visualGroup) this.visualGroup.visible = true;
-    if (this.interactiveCutawayGroup) this.interactiveCutawayGroup.visible = false;
+    try {
+      // Ensure full exterior mesh is visible for exterior RENDER_VIEWS
+      this.debugMarkerGroup.visible = false;
+      if (this.visualGroup) this.visualGroup.visible = true;
+      if (this.interactiveCutawayGroup) this.interactiveCutawayGroup.visible = false;
 
-    const rawPixels = new Uint8Array(res * res * 4);
-    const outCanvas = document.createElement("canvas");
-    outCanvas.width = res;
-    outCanvas.height = res;
-    const ctx = outCanvas.getContext("2d")!;
-    const imgData = ctx.createImageData(res, res);
+      const rawPixels = new Uint8Array(res * res * 4);
+      const outCanvas = document.createElement("canvas");
+      outCanvas.width = res;
+      outCanvas.height = res;
+      const ctx = outCanvas.getContext("2d")!;
+      const imgData = ctx.createImageData(res, res);
 
-    const images = {} as Record<ViewDirection, string>;
-    const sharedResources = { visualTarget, rawPixels, outCanvas, ctx, imgData };
+      const images = {} as Record<ViewDirection, string>;
+      const sharedResources = { visualTarget, rawPixels, outCanvas, ctx, imgData };
 
-    for (const view of VIEW_DIRECTIONS) {
-      const cam = this.createDirectionCamera(view, 1.0);
-      images[view] = this.renderCameraToPng(cam, res, sharedResources);
-      this.pickerPass.renderViewBuffer(
-        this.renderer,
-        view,
-        cam,
-        res,
-        this.fullPickerGeometry ?? undefined
-      );
+      for (const view of VIEW_DIRECTIONS) {
+        const cam = this.createDirectionCamera(view, 1.0);
+        images[view] = this.renderCameraToPng(cam, res, sharedResources);
+        this.pickerPass.renderViewBuffer(
+          this.renderer,
+          view,
+          cam,
+          res,
+          this.fullPickerGeometry ?? undefined
+        );
+      }
+
+      return images;
+    } finally {
+      visualTarget.dispose();
+      this.debugMarkerGroup.visible = prevMarkerVisible;
+      if (this.visualGroup) this.visualGroup.visible = prevFullVisible;
+      if (this.interactiveCutawayGroup) this.interactiveCutawayGroup.visible = prevCutawayVisible;
+      this.renderer.setRenderTarget(prevTarget);
+      this.renderer.setClearColor(prevClearColor, prevClearAlpha);
     }
-
-    visualTarget.dispose();
-    this.debugMarkerGroup.visible = prevMarkerVisible;
-    if (this.visualGroup) this.visualGroup.visible = prevFullVisible;
-    if (this.interactiveCutawayGroup) this.interactiveCutawayGroup.visible = prevCutawayVisible;
-    this.renderer.setRenderTarget(prevTarget);
-    this.renderer.setClearColor(prevClearColor, prevClearAlpha);
-
-    return images;
   }
 
   /**
@@ -1016,12 +1034,14 @@ class MineBuildingViewer {
     cutawayImages: Record<ViewDirection, string>;
     roomEyeImages: Record<number, Record<CardinalDirection, string>>;
   }> {
-    const res = Math.max(64, Math.min(2048, Math.floor(resolution || 512)));
+    const res = clampResolution(resolution, 512);
 
     // Sync HUD slider to inspected cutY
     this.cutawayY = cutY;
     const sliderEl = document.getElementById("cutaway-y-slider") as HTMLInputElement | null;
     if (sliderEl) {
+      if (cutY > Number(sliderEl.max)) sliderEl.max = String(cutY);
+      if (cutY < Number(sliderEl.min)) sliderEl.min = String(cutY);
       sliderEl.value = String(cutY);
     }
     if (this.cutawayEnabled) {
@@ -1047,109 +1067,43 @@ class MineBuildingViewer {
       ? this.interactiveCutawayGroup.visible
       : false;
     const prevGridVisible = this.gridHelper ? this.gridHelper.visible : true;
+    const prevAmbientIntensity = this.ambientLight.intensity;
 
-    this.debugMarkerGroup.visible = false;
-    if (this.visualGroup) this.visualGroup.visible = false;
-    if (this.interactiveCutawayGroup) this.interactiveCutawayGroup.visible = false;
+    let roomLight: THREE.PointLight | null = null;
+    try {
+      this.debugMarkerGroup.visible = false;
+      if (this.visualGroup) this.visualGroup.visible = false;
+      if (this.interactiveCutawayGroup) this.interactiveCutawayGroup.visible = false;
 
-    const rawPixels = new Uint8Array(res * res * 4);
-    const outCanvas = document.createElement("canvas");
-    outCanvas.width = res;
-    outCanvas.height = res;
-    const ctx = outCanvas.getContext("2d")!;
-    const imgData = ctx.createImageData(res, res);
+      const rawPixels = new Uint8Array(res * res * 4);
+      const outCanvas = document.createElement("canvas");
+      outCanvas.width = res;
+      outCanvas.height = res;
+      const ctx = outCanvas.getContext("2d")!;
+      const imgData = ctx.createImageData(res, res);
 
-    const cutawayImages = {} as Record<ViewDirection, string>;
+      const cutawayImages = {} as Record<ViewDirection, string>;
 
-    // 1. Dollhouse Cutaway Views (NE, SE, SW, NW) + Synchronized OffscreenPickerPass
-    for (const view of VIEW_DIRECTIONS) {
-      const filteredVoxels = filterVoxelsForCutaway(this.currentVoxels, cutY, view);
-      const cutBuilt = await buildWorldMeshes(
-        filteredVoxels,
-        this.worldSize,
-        this.currentTextures,
-        this.currentBlockModels
-      );
+      // 1. Dollhouse Cutaway Views (NE, SE, SW, NW) + Synchronized OffscreenPickerPass
+      for (const view of VIEW_DIRECTIONS) {
+        const filteredVoxels = filterVoxelsForCutaway(this.currentVoxels, cutY, view);
+        const cutBuilt = await buildWorldMeshes(
+          filteredVoxels,
+          this.worldSize,
+          this.currentTextures,
+          this.currentBlockModels
+        );
 
-      this.scene.add(cutBuilt.visualGroup);
-      const cam = this.createDirectionCamera(view, 1.0);
-
-      // Visual Pass for cutaway view
-      this.renderer.setRenderTarget(visualTarget);
-      this.renderer.setClearColor(new THREE.Color(0x0f172a), 1.0);
-      this.renderer.clear(true, true, false);
-      this.renderer.render(this.scene, cam);
-
-      cutawayImages[view] = this.readTargetToDataUrl(
-        visualTarget,
-        res,
-        rawPixels,
-        ctx,
-        imgData,
-        outCanvas
-      );
-
-      // Synchronized Offscreen ID Picker Pass with the exact same cutaway geometry
-      this.pickerPass.renderViewBuffer(
-        this.renderer,
-        view,
-        cam,
-        res,
-        cutBuilt.pickerGeometry
-      );
-
-      this.scene.remove(cutBuilt.visualGroup);
-      this.disposeGroupGeometries(cutBuilt.visualGroup);
-      cutBuilt.pickerGeometry.dispose();
-    }
-
-    // 2. Room Eye-Level 1st-Person Views (N, S, E, W) using full uncut world mesh
-    const roomEyeImages: Record<number, Record<CardinalDirection, string>> = {};
-    if (rooms && rooms.length > 0) {
-      if (this.visualGroup) this.visualGroup.visible = true;
-      if (this.gridHelper) this.gridHelper.visible = false;
-
-      const prevAmbientIntensity = this.ambientLight.intensity;
-      this.ambientLight.intensity = 0.95;
-
-      const eyeCam = new THREE.PerspectiveCamera(75, 1.0, 0.1, 100);
-      const roomLight = new THREE.PointLight(0xfff4d6, 2.2, 28, 1.0);
-      this.scene.add(roomLight);
-
-      for (const room of rooms) {
-        const { x, y, z } = room.eyePosition;
-        eyeCam.position.set(x, y, z);
-        eyeCam.up.set(0, 1, 0);
-        roomLight.position.set(x, y + 0.25, z);
-
-        const dirImages = {} as Record<CardinalDirection, string>;
-        for (const dir of CARDINAL_DIRECTIONS) {
-          let tx = x;
-          let tz = z;
-          switch (dir) {
-            case "N":
-              tz = z - 10;
-              break;
-            case "S":
-              tz = z + 10;
-              break;
-            case "E":
-              tx = x + 10;
-              break;
-            case "W":
-              tx = x - 10;
-              break;
-          }
-          eyeCam.lookAt(tx, y, tz);
-          eyeCam.updateProjectionMatrix();
-          eyeCam.updateMatrixWorld(true);
+        try {
+          this.scene.add(cutBuilt.visualGroup);
+          const cam = this.createDirectionCamera(view, 1.0);
 
           this.renderer.setRenderTarget(visualTarget);
           this.renderer.setClearColor(new THREE.Color(0x0f172a), 1.0);
           this.renderer.clear(true, true, false);
-          this.renderer.render(this.scene, eyeCam);
+          this.renderer.render(this.scene, cam);
 
-          dirImages[dir] = this.readTargetToDataUrl(
+          cutawayImages[view] = this.readTargetToDataUrl(
             visualTarget,
             res,
             rawPixels,
@@ -1157,25 +1111,96 @@ class MineBuildingViewer {
             imgData,
             outCanvas
           );
-        }
 
-        roomEyeImages[room.roomId] = dirImages;
+          // Synchronized Offscreen ID Picker Pass with the exact same cutaway geometry
+          this.pickerPass.renderViewBuffer(
+            this.renderer,
+            view,
+            cam,
+            res,
+            cutBuilt.pickerGeometry
+          );
+        } finally {
+          this.scene.remove(cutBuilt.visualGroup);
+          this.disposeGroupGeometries(cutBuilt.visualGroup);
+          cutBuilt.pickerGeometry.dispose();
+        }
       }
 
-      this.scene.remove(roomLight);
-      roomLight.dispose();
+      // 2. Room Eye-Level 1st-Person Views (N, S, E, W) using full uncut world mesh
+      const roomEyeImages: Record<number, Record<CardinalDirection, string>> = {};
+      if (rooms && rooms.length > 0) {
+        if (this.visualGroup) this.visualGroup.visible = true;
+        if (this.gridHelper) this.gridHelper.visible = false;
+
+        this.ambientLight.intensity = 0.95;
+
+        const eyeCam = new THREE.PerspectiveCamera(75, 1.0, 0.1, 100);
+        roomLight = new THREE.PointLight(0xfff4d6, 2.2, 28, 1.0);
+        this.scene.add(roomLight);
+
+        for (const room of rooms) {
+          const { x, y, z } = room.eyePosition;
+          eyeCam.position.set(x, y, z);
+          eyeCam.up.set(0, 1, 0);
+          roomLight.position.set(x, y + 0.25, z);
+
+          const dirImages = {} as Record<CardinalDirection, string>;
+          for (const dir of CARDINAL_DIRECTIONS) {
+            let tx = x;
+            let tz = z;
+            switch (dir) {
+              case "N":
+                tz = z - 10;
+                break;
+              case "S":
+                tz = z + 10;
+                break;
+              case "E":
+                tx = x + 10;
+                break;
+              case "W":
+                tx = x - 10;
+                break;
+            }
+            eyeCam.lookAt(tx, y, tz);
+            eyeCam.updateProjectionMatrix();
+            eyeCam.updateMatrixWorld(true);
+
+            this.renderer.setRenderTarget(visualTarget);
+            this.renderer.setClearColor(new THREE.Color(0x0f172a), 1.0);
+            this.renderer.clear(true, true, false);
+            this.renderer.render(this.scene, eyeCam);
+
+            dirImages[dir] = this.readTargetToDataUrl(
+              visualTarget,
+              res,
+              rawPixels,
+              ctx,
+              imgData,
+              outCanvas
+            );
+          }
+
+          roomEyeImages[room.roomId] = dirImages;
+        }
+      }
+
+      return { cutawayImages, roomEyeImages };
+    } finally {
+      if (roomLight) {
+        this.scene.remove(roomLight);
+        roomLight.dispose();
+      }
       this.ambientLight.intensity = prevAmbientIntensity;
+      visualTarget.dispose();
+      this.debugMarkerGroup.visible = prevMarkerVisible;
+      if (this.gridHelper) this.gridHelper.visible = prevGridVisible;
+      if (this.visualGroup) this.visualGroup.visible = prevFullVisible;
+      if (this.interactiveCutawayGroup) this.interactiveCutawayGroup.visible = prevCutawayVisible;
+      this.renderer.setRenderTarget(prevTarget);
+      this.renderer.setClearColor(prevClearColor, prevClearAlpha);
     }
-
-    visualTarget.dispose();
-    this.debugMarkerGroup.visible = prevMarkerVisible;
-    if (this.gridHelper) this.gridHelper.visible = prevGridVisible;
-    if (this.visualGroup) this.visualGroup.visible = prevFullVisible;
-    if (this.interactiveCutawayGroup) this.interactiveCutawayGroup.visible = prevCutawayVisible;
-    this.renderer.setRenderTarget(prevTarget);
-    this.renderer.setClearColor(prevClearColor, prevClearAlpha);
-
-    return { cutawayImages, roomEyeImages };
   }
 
   /**
@@ -1245,12 +1270,9 @@ class MineBuildingViewer {
         }
       } else {
         const aspect = window.innerWidth / Math.max(1, window.innerHeight);
-        this.customOrthoCamera = this.buildCustomCamera(
-          aspect,
-          explicitPosition
-        ) as THREE.OrthographicCamera;
+        this.customCamera = this.buildCustomCamera(aspect, explicitPosition);
         this.activeViewMode = "custom";
-        this.activeCamera = this.customOrthoCamera;
+        this.activeCamera = this.customCamera;
         this.controls.enabled = false;
 
         buttons.forEach((b) => b.classList.remove("active"));
@@ -1290,7 +1312,8 @@ class MineBuildingViewer {
           this.renderer,
           view,
           cam,
-          this.pickerPass.getResolution()
+          this.pickerPass.getResolution(),
+          this.fullPickerGeometry ?? undefined
         );
       }
     }
@@ -1300,6 +1323,15 @@ class MineBuildingViewer {
     this.updateHudInspector(result, `AI (${view} @ ${u},${v})`);
     this.updateAiQuerySection(view, u, v, result);
     return result;
+  }
+
+  private renderTraceElement(container: HTMLElement, trace: TraceRecord): void {
+    container.textContent = "";
+    const badge = document.createElement("span");
+    badge.className = "trace-line-badge";
+    badge.textContent = `Line ${trace.line}`;
+    container.appendChild(badge);
+    container.appendChild(document.createTextNode(trace.codeSnippet));
   }
 
   private updateHudInspector(result: InspectResult, sourceLabel: string): void {
@@ -1343,9 +1375,7 @@ class MineBuildingViewer {
     }
     if (traceEl) {
       if (result.trace) {
-        traceEl.innerHTML = `<span class="trace-line-badge">Line ${result.trace.line}</span>${this.escapeHtml(
-          result.trace.codeSnippet
-        )}`;
+        this.renderTraceElement(traceEl, result.trace);
       } else if (result.isTerrain) {
         traceEl.textContent = "Initial terrain block (opId = 0)";
       } else {
@@ -1375,22 +1405,13 @@ class MineBuildingViewer {
     if (targetEl) targetEl.textContent = `(${x}, ${y}, ${z}) ${result.block ?? ""}`;
     if (traceEl) {
       if (result.trace) {
-        traceEl.innerHTML = `<span class="trace-line-badge">Line ${result.trace.line}</span>${this.escapeHtml(
-          result.trace.codeSnippet
-        )}`;
+        this.renderTraceElement(traceEl, result.trace);
       } else {
         traceEl.textContent = result.isTerrain
           ? "Terrain voxel (opId: 0)"
           : "AI voxel (no trace snippet)";
       }
     }
-  }
-
-  private escapeHtml(str: string): string {
-    return str
-      .replace(/&/g, "&amp;")
-      .replace(/</g, "&lt;")
-      .replace(/>/g, "&gt;");
   }
 
   private bindEvents(): void {
@@ -1402,11 +1423,11 @@ class MineBuildingViewer {
       this.orbitCamera.updateProjectionMatrix();
 
       if (this.activeViewMode === "custom") {
-        this.customOrthoCamera = this.buildCustomCamera(
+        this.customCamera = this.buildCustomCamera(
           w / h,
           this.customCameraHasExplicitPosition
-        ) as THREE.OrthographicCamera;
-        this.activeCamera = this.customOrthoCamera;
+        );
+        this.activeCamera = this.customCamera;
       } else if (this.activeViewMode !== "free") {
         this.activeCamera = this.createDirectionCamera(this.activeViewMode, w / h);
       }
@@ -1492,7 +1513,7 @@ class MineBuildingViewer {
         const x = arr[vertIndex * 4];
         const y = arr[vertIndex * 4 + 1];
         const z = arr[vertIndex * 4 + 2];
-        const opId = arr[vertIndex * 4 + 3];
+        const { opId } = decodePickerAlphaByte(arr[vertIndex * 4 + 3]);
 
         const res = this.pickerPass.resolveCoordinate(x, y, z, opId);
         this.highlightCoordinate(res.coord);
@@ -1518,13 +1539,25 @@ class MineBuildingViewer {
         });
       }
     }
-    await this.syncWorld(demoVoxels, [32, 32, 32]);
+    await this.syncWorld(demoVoxels, [32, 32, 32], undefined, undefined, undefined, true);
+  }
+
+  private scheduleReconnect(): void {
+    if (this.reconnectTimer !== null) return;
+    this.reconnectTimer = window.setTimeout(() => {
+      this.reconnectTimer = null;
+      this.connectWebSocket();
+    }, 1000);
   }
 
   private connectWebSocket(): void {
     const params = new URLSearchParams(window.location.search);
     const wsUrlParam = params.get("wsUrl") || params.get("ws");
-    const wsPort = params.get("wsPort") || "3001";
+    const injectedWsPort =
+      typeof __MINEBUILDING_WS_PORT__ !== "undefined" && __MINEBUILDING_WS_PORT__
+        ? String(__MINEBUILDING_WS_PORT__)
+        : "";
+    const wsPort = params.get("wsPort") || injectedWsPort || "3001";
     const clientRole = params.get("client");
     const host = window.location.hostname || "127.0.0.1";
     const baseUrl = wsUrlParam || `ws://${host}:${wsPort}`;
@@ -1552,31 +1585,44 @@ class MineBuildingViewer {
       this.ws = ws;
 
       ws.addEventListener("open", () => {
+        if (this.ws !== ws) return;
         setStatus(true);
       });
 
       ws.addEventListener("message", (event) => {
+        if (this.ws !== ws) return;
         this.wsQueue = this.wsQueue.then(async () => {
+          let reqId: string | undefined;
           try {
             const req = JSON.parse(String(event.data)) as WsRequest;
+            reqId = req.id;
             await this.handleWsRequest(req);
           } catch (err) {
             console.error("[MineBuildingViewer] Failed to handle WS message:", err);
+            if (reqId) {
+              this.sendWsResponse({
+                type: "ERROR",
+                id: reqId,
+                message: err instanceof Error ? err.message : String(err)
+              });
+            }
           }
         });
       });
 
       ws.addEventListener("close", () => {
+        if (this.ws !== ws) return;
         setStatus(false);
-        setTimeout(() => this.connectWebSocket(), 1000);
+        this.scheduleReconnect();
       });
 
       ws.addEventListener("error", () => {
+        if (this.ws !== ws) return;
         ws.close();
       });
     } catch {
       setStatus(false);
-      setTimeout(() => this.connectWebSocket(), 1000);
+      this.scheduleReconnect();
     }
   }
 

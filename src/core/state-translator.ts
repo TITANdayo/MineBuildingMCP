@@ -140,7 +140,12 @@ function isBedBlock(shortName: string): boolean {
 }
 
 function isLanternBlock(shortName: string): boolean {
-  return shortName === "lantern" || shortName === "soul_lantern";
+  return (
+    shortName === "lantern" ||
+    (shortName.endsWith("_lantern") &&
+      shortName !== "sea_lantern" &&
+      shortName !== "jack_o_lantern")
+  );
 }
 
 function isPillarBlock(shortName: string): boolean {
@@ -149,11 +154,15 @@ function isPillarBlock(shortName: string): boolean {
     shortName.endsWith("_stem") ||
     shortName.endsWith("_wood") ||
     shortName.endsWith("_hyphae") ||
+    shortName.endsWith("_chain") ||
+    shortName.endsWith("_froglight") ||
+    shortName.endsWith("bamboo_block") ||
     shortName.includes("pillar") ||
     shortName.includes("basalt") ||
     shortName.includes("deepslate") ||
     shortName === "hay_block" ||
     shortName === "bone_block" ||
+    shortName === "muddy_mangrove_roots" ||
     shortName === "chain"
   );
 }

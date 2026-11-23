@@ -1,10 +1,11 @@
 import * as THREE from "three";
+import { coordKey } from "../core/block-name.js";
 import type {
   InspectResult,
   InspectViewId,
   RawPickResult,
   TraceRecord,
-  VoxelData
+  VoxelData,
 } from "../types/shared.js";
 
 const PICKER_VERTEX_SHADER = /* glsl */ `
@@ -25,6 +26,45 @@ const PICKER_FRAGMENT_SHADER = /* glsl */ `
     gl_FragColor = vPickColor;
   }
 `;
+
+/**
+ * Converts image-space coordinates `(u, v)` (either normalized `[0.0, 1.0]` with at least
+ * one non-integer fractional coordinate, or pixel coordinates `[0, res - 1]`) into
+ * clamped top-left pixel indices `[0, res - 1]`.
+ */
+export function resolvePickerPixelCoords(
+  u: number,
+  v: number,
+  resolution: number
+): { pxU: number; pxV: number } {
+  const isNormalized =
+    u >= 0 &&
+    u <= 1 &&
+    v >= 0 &&
+    v <= 1 &&
+    (!Number.isInteger(u) || !Number.isInteger(v));
+
+  const rawU = isNormalized ? Math.floor(u * resolution) : Math.floor(u);
+  const rawV = isNormalized ? Math.floor(v * resolution) : Math.floor(v);
+
+  return {
+    pxU: Math.max(0, Math.min(resolution - 1, rawU)),
+    pxV: Math.max(0, Math.min(resolution - 1, rawV)),
+  };
+}
+
+/**
+ * Decodes the picker alpha byte written by `encodePickerAlphaByte`:
+ * - `0`   -> sky / background miss
+ * - `255` -> terrain (`opId = 0`)
+ * - `1..254` -> build `opId` modulo bucket
+ */
+export function decodePickerAlphaByte(a: number): { isSky: boolean; opId: number } {
+  if (a === 0) {
+    return { isSky: true, opId: 0 };
+  }
+  return { isSky: false, opId: a === 255 ? 0 : a };
+}
 
 export class OffscreenPickerPass {
   private pickerScene: THREE.Scene;
@@ -56,7 +96,7 @@ export class OffscreenPickerPass {
       transparent: false,
       depthTest: true,
       depthWrite: true,
-      side: THREE.DoubleSide
+      side: THREE.DoubleSide,
     });
 
     this.renderTarget = this.createTarget(initialResolution);
@@ -70,7 +110,7 @@ export class OffscreenPickerPass {
       type: THREE.UnsignedByteType,
       depthBuffer: true,
       stencilBuffer: false,
-      samples: 0
+      samples: 0,
     });
     rt.texture.colorSpace = THREE.NoColorSpace;
     rt.texture.generateMipmaps = false;
@@ -79,6 +119,8 @@ export class OffscreenPickerPass {
 
   /**
    * Updates the picker mesh geometry and world lookup tables on SYNC_WORLD.
+   * Note: geometry lifecycle/disposal is owned by the caller so shared/swapped cutaway geometries
+   * are never double-disposed or leaked.
    */
   public setWorldData(
     pickerGeometry: THREE.BufferGeometry,
@@ -86,17 +128,16 @@ export class OffscreenPickerPass {
     traces?: Record<number, TraceRecord>
   ): void {
     if (this.pickerMesh) {
-      this.pickerScene.remove(this.pickerMesh);
-      this.pickerMesh.geometry.dispose();
+      this.pickerMesh.geometry = pickerGeometry;
+    } else {
+      this.pickerMesh = new THREE.Mesh(pickerGeometry, this.pickerMaterial);
+      this.pickerMesh.frustumCulled = false;
+      this.pickerScene.add(this.pickerMesh);
     }
-
-    this.pickerMesh = new THREE.Mesh(pickerGeometry, this.pickerMaterial);
-    this.pickerMesh.frustumCulled = false;
-    this.pickerScene.add(this.pickerMesh);
 
     this.voxelMap.clear();
     for (const v of voxels) {
-      this.voxelMap.set(`${v.x},${v.y},${v.z}`, v);
+      this.voxelMap.set(coordKey(v.x, v.y, v.z), v);
     }
 
     this.traces = traces ?? {};
@@ -148,45 +189,46 @@ export class OffscreenPickerPass {
     }
 
     const prevGeometry = this.pickerMesh?.geometry;
-    if (overrideGeometry && this.pickerMesh) {
-      this.pickerMesh.geometry = overrideGeometry;
-    }
-
     const prevTarget = renderer.getRenderTarget();
     const prevToneMapping = renderer.toneMapping;
     const prevAutoClear = renderer.autoClear;
     const prevClearColor = renderer.getClearColor(new THREE.Color());
     const prevClearAlpha = renderer.getClearAlpha();
 
-    renderer.toneMapping = THREE.NoToneMapping;
-    renderer.autoClear = true;
-    renderer.setRenderTarget(this.renderTarget);
-    // Clear background sky to (255, 255, 255, 0) so sky is unambiguously distinct from any valid voxel
-    renderer.setClearColor(new THREE.Color(1, 1, 1), 0);
-    renderer.clear(true, true, false);
-    renderer.render(this.pickerScene, camera);
+    try {
+      if (overrideGeometry && this.pickerMesh) {
+        this.pickerMesh.geometry = overrideGeometry;
+      }
 
-    const byteBuffer = new Uint8Array(resolution * resolution * 4);
-    renderer.readRenderTargetPixels(
-      this.renderTarget,
-      0,
-      0,
-      resolution,
-      resolution,
-      byteBuffer
-    );
+      renderer.toneMapping = THREE.NoToneMapping;
+      renderer.autoClear = true;
+      renderer.setRenderTarget(this.renderTarget);
+      // Clear sky to (0, 0, 0, 0): alpha=0 unambiguously identifies sky across all 0..255 coords
+      renderer.setClearColor(new THREE.Color(0, 0, 0), 0);
+      renderer.clear(true, true, false);
+      renderer.render(this.pickerScene, camera);
 
-    // Restore renderer and mesh state
-    if (overrideGeometry && this.pickerMesh && prevGeometry) {
-      this.pickerMesh.geometry = prevGeometry;
+      const byteBuffer = new Uint8Array(resolution * resolution * 4);
+      renderer.readRenderTargetPixels(
+        this.renderTarget,
+        0,
+        0,
+        resolution,
+        resolution,
+        byteBuffer
+      );
+
+      this.viewBuffers.set(view, { buffer: byteBuffer, resolution });
+      return byteBuffer;
+    } finally {
+      if (overrideGeometry && this.pickerMesh && prevGeometry) {
+        this.pickerMesh.geometry = prevGeometry;
+      }
+      renderer.setRenderTarget(prevTarget);
+      renderer.toneMapping = prevToneMapping;
+      renderer.autoClear = prevAutoClear;
+      renderer.setClearColor(prevClearColor, prevClearAlpha);
     }
-    renderer.setRenderTarget(prevTarget);
-    renderer.toneMapping = prevToneMapping;
-    renderer.autoClear = prevAutoClear;
-    renderer.setClearColor(prevClearColor, prevClearAlpha);
-
-    this.viewBuffers.set(view, { buffer: byteBuffer, resolution });
-    return byteBuffer;
   }
 
   /**
@@ -200,13 +242,9 @@ export class OffscreenPickerPass {
     }
 
     const { buffer, resolution: res } = entry;
-
-    // Support both pixel coordinates [0, res-1] and normalized coordinates (0, 1)
-    const pxU = u > 0 && u < 1 && v > 0 && v < 1 ? Math.floor(u * res) : Math.floor(u);
-    const pxV = u > 0 && u < 1 && v > 0 && v < 1 ? Math.floor(v * res) : Math.floor(v);
-
-    const fbX = Math.max(0, Math.min(res - 1, pxU));
-    const fbY = Math.max(0, Math.min(res - 1, res - 1 - pxV));
+    const { pxU, pxV } = resolvePickerPixelCoords(u, v, res);
+    const fbX = pxU;
+    const fbY = res - 1 - pxV;
 
     const idx = (fbY * res + fbX) * 4;
     const r = buffer[idx];
@@ -214,12 +252,12 @@ export class OffscreenPickerPass {
     const b = buffer[idx + 2];
     const a = buffer[idx + 3];
 
-    // Sky clear color is (255, 255, 255, 0)
-    if (r === 255 && g === 255 && b === 255 && a === 0) {
+    const decoded = decodePickerAlphaByte(a);
+    if (decoded.isSky) {
       return { hit: false };
     }
 
-    if (!this.voxelMap.has(`${r},${g},${b}`)) {
+    if (!this.voxelMap.has(coordKey(r, g, b))) {
       return { hit: false };
     }
 
@@ -228,7 +266,7 @@ export class OffscreenPickerPass {
       x: r,
       y: g,
       z: b,
-      opId: a
+      opId: decoded.opId,
     };
   }
 
@@ -237,7 +275,7 @@ export class OffscreenPickerPass {
    * including block name, state, isTerrain, code TraceRecord, and distanceToGround.
    */
   public resolveCoordinate(x: number, y: number, z: number, fallbackOpId?: number): InspectResult {
-    const voxel = this.voxelMap.get(`${x},${y},${z}`);
+    const voxel = this.voxelMap.get(coordKey(x, y, z));
     if (!voxel) {
       return { hit: false };
     }
@@ -245,13 +283,13 @@ export class OffscreenPickerPass {
     // Calculate vertical distance to the nearest non-air block directly below (x, y, z)
     let distanceToGround = y;
     for (let checkY = y - 1; checkY >= 0; checkY--) {
-      if (this.voxelMap.has(`${x},${checkY},${z}`)) {
+      if (this.voxelMap.has(coordKey(x, checkY, z))) {
         distanceToGround = y - 1 - checkY;
         break;
       }
     }
 
-    const opId = voxel.opId ?? fallbackOpId ?? 0;
+    const opId = voxel.opId !== 0 ? voxel.opId : (fallbackOpId ?? 0);
     const trace = opId > 0 ? this.traces[opId] : undefined;
 
     return {
@@ -261,7 +299,7 @@ export class OffscreenPickerPass {
       state: voxel.state,
       isTerrain: voxel.isTerrain,
       trace,
-      distanceToGround
+      distanceToGround,
     };
   }
 
@@ -274,5 +312,11 @@ export class OffscreenPickerPass {
       return { hit: false };
     }
     return this.resolveCoordinate(raw.x, raw.y, raw.z, raw.opId);
+  }
+
+  public dispose(): void {
+    this.renderTarget.dispose();
+    this.pickerMaterial.dispose();
+    this.viewBuffers.clear();
   }
 }

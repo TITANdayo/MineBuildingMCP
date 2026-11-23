@@ -9,6 +9,30 @@ import {
 import { normalizeBlockName, VoxelWorld } from "./voxel-world.js";
 
 const SCRIPT_FILENAME = "ai_build_script.js";
+const SCRIPT_LINE_REGEX = /ai_build_script\.js:(\d+):(\d+)/;
+const MAX_UNIQUE_TRACES = 2000;
+const DEFAULT_SCRIPT_TIMEOUT_MS = 30_000;
+
+const WOOD_GABLE_TYPES = new Set([
+  "oak",
+  "spruce",
+  "birch",
+  "jungle",
+  "acacia",
+  "dark_oak",
+  "mangrove",
+  "cherry",
+  "bamboo",
+  "pale_oak",
+  "crimson",
+  "warped",
+]);
+
+const EXACT_GABLE_MAP: Record<string, string> = {
+  "minecraft:brick": "minecraft:bricks",
+  "minecraft:quartz": "minecraft:quartz_block",
+  "minecraft:purpur": "minecraft:purpur_block",
+};
 
 function formatArg(arg: unknown): string {
   if (typeof arg === "string") {
@@ -41,23 +65,12 @@ function deriveGableBlock(stairBlock: string): string {
   const norm = normalizeBlockName(stairBlock);
   if (norm.endsWith("_stairs")) {
     const base = norm.slice(0, -"_stairs".length);
-    const woodTypes = [
-      "oak",
-      "spruce",
-      "birch",
-      "jungle",
-      "acacia",
-      "dark_oak",
-      "mangrove",
-      "cherry",
-      "bamboo",
-      "crimson",
-      "warped",
-    ];
-    for (const wood of woodTypes) {
-      if (base === `minecraft:${wood}`) {
-        return `${base}_planks`;
-      }
+    if (base in EXACT_GABLE_MAP) {
+      return EXACT_GABLE_MAP[base];
+    }
+    const shortBase = base.replace(/^minecraft:/, "");
+    if (WOOD_GABLE_TYPES.has(shortBase)) {
+      return `${base}_planks`;
     }
     if (
       base.endsWith("_brick") ||
@@ -72,6 +85,13 @@ function deriveGableBlock(stairBlock: string): string {
   return norm;
 }
 
+export interface ExecuteBuildScriptOptions {
+  /** Whether to run `world.evaluateStructure()` after script execution (default: true). */
+  evaluate?: boolean;
+  /** Maximum synchronous execution time in milliseconds before aborting (default: 30000). */
+  timeoutMs?: number;
+}
+
 export interface BuildExecutionResult {
   opCount: number;
   traces: Record<number, TraceRecord>;
@@ -80,20 +100,26 @@ export interface BuildExecutionResult {
 
 export class BuilderDSL {
   public readonly world: VoxelWorld;
-  private opCounter = 0;
+  private opCounter: number;
   private activeOpId = 0;
   private callDepth = 0;
+  private lineToOpId = new Map<number, number>();
 
   constructor(world: VoxelWorld) {
     this.world = world;
+    this.opCounter = world.getMaxOpId();
+    for (const trace of world.traces.values()) {
+      if (!this.lineToOpId.has(trace.line)) {
+        this.lineToOpId.set(trace.line, trace.opId);
+      }
+    }
   }
 
   private extractLineNumber(stack?: string): number {
     if (!stack) return 1;
 
     // 1. Check for vm.Script filename match: ai_build_script.js:<line>:<col>
-    const scriptRegex = new RegExp(`${SCRIPT_FILENAME}:(\\d+):(\\d+)`);
-    const scriptMatch = stack.match(scriptRegex);
+    const scriptMatch = stack.match(SCRIPT_LINE_REGEX);
     if (scriptMatch) {
       return Math.max(1, parseInt(scriptMatch[1], 10));
     }
@@ -126,17 +152,31 @@ export class BuilderDSL {
   private beginOperation(funcName: string, args: unknown[]): number {
     this.callDepth++;
     if (this.callDepth === 1) {
-      this.opCounter++;
-      this.activeOpId = ((this.opCounter - 1) % 255) + 1;
       const err = new Error();
       const line = this.extractLineNumber(err.stack);
-      const codeSnippet = formatCodeSnippet(funcName, args);
-      const trace: TraceRecord = {
-        opId: this.activeOpId,
-        line,
-        codeSnippet,
-      };
-      this.world.recordTrace(trace);
+      // Beyond MAX_UNIQUE_TRACES (e.g. tight loops calling setBlock thousands of times),
+      // reuse the first opId recorded on that line so earlier operations are never overwritten
+      // while trace table size stays bounded and line numbers stay exact.
+      const existingLineOp =
+        this.world.traces.size >= MAX_UNIQUE_TRACES
+          ? this.lineToOpId.get(line)
+          : undefined;
+      if (existingLineOp !== undefined) {
+        this.activeOpId = existingLineOp;
+      } else {
+        this.opCounter++;
+        this.activeOpId = this.opCounter;
+        const codeSnippet = formatCodeSnippet(funcName, args);
+        const trace: TraceRecord = {
+          opId: this.activeOpId,
+          line,
+          codeSnippet,
+        };
+        this.world.recordTrace(trace);
+        if (!this.lineToOpId.has(line)) {
+          this.lineToOpId.set(line, this.activeOpId);
+        }
+      }
     }
     return this.activeOpId;
   }
@@ -334,12 +374,15 @@ export class BuilderDSL {
 
       if (followTerrain) {
         for (const [x, z] of footprint) {
-          const terrainY = this.world.getSurfaceY(x, z, true);
-          const currentY = this.world.getSurfaceY(x, z, false);
-          const colStartY =
-            baseY !== undefined
-              ? Math.floor(baseY)
-              : Math.max(0, (terrainY >= 0 ? terrainY : currentY) + 1);
+          let colStartY: number;
+          if (baseY !== undefined) {
+            colStartY = Math.floor(baseY);
+          } else {
+            const terrainY = this.world.getSurfaceY(x, z, true);
+            const surfaceY =
+              terrainY >= 0 ? terrainY : this.world.getSurfaceY(x, z, false);
+            colStartY = Math.max(0, surfaceY + 1);
+          }
           for (let dy = 0; dy < h; dy++) {
             this.setBlockInternal(x, colStartY + dy, z, block);
           }
@@ -481,7 +524,7 @@ export class BuilderDSL {
   }
 
   /**
-   * Draws a 3D line of blocks from (x1, y1, z1) to (x2, y2, z2) using 3D Bresenham algorithm.
+   * Draws a 3D line of blocks from (x1, y1, z1) to (x2, y2, z2) using uniform DDA interpolation.
    */
   public line(
     x1: number,
@@ -495,21 +538,18 @@ export class BuilderDSL {
   ): void {
     this.beginOperation("line", [x1, y1, z1, x2, y2, z2, block, state]);
     try {
-      let ix1 = Math.floor(x1);
-      let iy1 = Math.floor(y1);
-      let iz1 = Math.floor(z1);
+      const ix1 = Math.floor(x1);
+      const iy1 = Math.floor(y1);
+      const iz1 = Math.floor(z1);
       const ix2 = Math.floor(x2);
       const iy2 = Math.floor(y2);
       const iz2 = Math.floor(z2);
 
-      const dx = Math.abs(ix2 - ix1);
-      const dy = Math.abs(iy2 - iy1);
-      const dz = Math.abs(iz2 - iz1);
-      const sx = ix1 < ix2 ? 1 : -1;
-      const sy = iy1 < iy2 ? 1 : -1;
-      const sz = iz1 < iz2 ? 1 : -1;
-
-      const steps = Math.max(dx, dy, dz);
+      const steps = Math.max(
+        Math.abs(ix2 - ix1),
+        Math.abs(iy2 - iy1),
+        Math.abs(iz2 - iz1)
+      );
       if (steps === 0) {
         this.setBlockInternal(ix1, iy1, iz1, block, state);
         return;
@@ -642,25 +682,33 @@ export class BuilderDSL {
         bedBlock = "minecraft:red_bed";
       }
 
+      const normFacing = String(facing ?? "north").toLowerCase();
+      const validFacing =
+        normFacing === "south" ||
+        normFacing === "east" ||
+        normFacing === "west"
+          ? normFacing
+          : "north";
+
       let dx = 0;
       let dz = -1;
-      if (facing === "south") {
+      if (validFacing === "south") {
         dx = 0;
         dz = 1;
-      } else if (facing === "east") {
+      } else if (validFacing === "east") {
         dx = 1;
         dz = 0;
-      } else if (facing === "west") {
+      } else if (validFacing === "west") {
         dx = -1;
         dz = 0;
       }
 
       this.setBlockInternal(ix, iy, iz, bedBlock, {
-        facing,
+        facing: validFacing,
         part: "foot",
       });
       this.setBlockInternal(ix + dx, iy, iz + dz, bedBlock, {
-        facing,
+        facing: validFacing,
         part: "head",
       });
     } finally {
@@ -1067,7 +1115,8 @@ export class BuilderDSL {
 export function executeBuildScript(
   world: VoxelWorld,
   jsCode: string,
-  resetBeforeRun = true
+  resetBeforeRun = true,
+  options: ExecuteBuildScriptOptions = {}
 ): BuildExecutionResult {
   if (resetBeforeRun) {
     world.resetBuild();
@@ -1100,20 +1149,33 @@ export function executeBuildScript(
     furnishRoom: dsl.furnishRoom.bind(dsl),
   };
 
-  // Keep line 1 of jsCode on line 1 of the compiled script so line numbers match 1-to-1
-  const wrappedCode = `(function(scope) { with (scope) { ${jsCode}\n} })`;
+  // Run inside an isolated VM context with timeout protection and strict-mode support,
+  // keeping line 1 of jsCode on line 1 of the compiled script for exact 1-to-1 line traces.
+  const context = vm.createContext(scopeBindings);
+  const wrappedCode = `(function() { ${jsCode}\n})()`;
   const script = new vm.Script(wrappedCode, {
     filename: SCRIPT_FILENAME,
     lineOffset: 0,
   });
 
-  const runner = script.runInThisContext() as (
-    scope: Record<string, unknown>
-  ) => void;
-  runner(scopeBindings);
+  const timeout =
+    typeof options.timeoutMs === "number" && Number.isFinite(options.timeoutMs) && options.timeoutMs > 0
+      ? Math.floor(options.timeoutMs)
+      : DEFAULT_SCRIPT_TIMEOUT_MS;
+  script.runInContext(context, { timeout });
 
   const traces = world.getTracesObject();
-  const evaluation = world.evaluateStructure();
+  const evaluation: StructureEvaluation =
+    options.evaluate === false
+      ? {
+          valid: world.outOfBoundsCount === 0,
+          totalBuildBlocks: 0,
+          floatingBlocks: [],
+          floatingClustersCount: 0,
+          outOfBoundsCount: world.outOfBoundsCount,
+          warnings: [],
+        }
+      : world.evaluateStructure();
 
   return {
     opCount: Object.keys(traces).length,

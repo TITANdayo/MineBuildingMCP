@@ -349,7 +349,7 @@ async function main() {
     const { filePath, code } = scriptTexts[i];
     const beforeCount = world.voxels.size;
     const t0 = Date.now();
-    executeBuildScript(world, (libCode ? libCode + "\n" : "") + code, false);
+    executeBuildScript(world, (libCode ? libCode + "\n" : "") + code, false, { evaluate: false });
     const dt = Date.now() - t0;
     const afterCount = world.voxels.size;
     console.log(
@@ -358,7 +358,7 @@ async function main() {
   }
 
   if (opts.emitAnchors) {
-    const preAnchorNames = Array.from(new Set(Array.from(world.voxels.values(), (v) => v.name)));
+    const preAnchorNames = world.getUniqueBlockNames();
     const preAnchorModels = defaultJarAssetLoader.getBlockModelsForBlocks(preAnchorNames);
     world.resolveBlockStates(preAnchorModels);
 
@@ -397,7 +397,7 @@ async function main() {
     // Re-run cleanly on top of the anchor canvas to verify exact anchored metrics
     world = await loadStructureNbt(anchorPath);
     for (const { code } of scriptTexts) {
-      executeBuildScript(world, (libCode ? libCode + "\n" : "") + code, false);
+      executeBuildScript(world, (libCode ? libCode + "\n" : "") + code, false, { evaluate: false });
     }
     let preservedAnchors = 0;
     for (const v of world.voxels.values()) {
@@ -429,9 +429,9 @@ async function main() {
   const blockModels = defaultJarAssetLoader.getBlockModelsForBlocks(uniqueNames);
 
   const tEval = Date.now();
-  world.resolveBlockStates(blockModels);
-  const lint = world.lintStructure(blockModels);
-  const evalRes = world.evaluateStructure(blockModels);
+  const { resolvedMap } = world.resolveBlockStatesWithMap(blockModels);
+  const lint = world.lintStructure(blockModels, resolvedMap);
+  const evalRes = world.evaluateStructure(blockModels, { includeLint: false });
   const dtEval = Date.now() - tEval;
 
   const [sx0, sx1, sy0, sy1, sz0, sz1] = opts.safeBox;
@@ -495,7 +495,7 @@ async function main() {
   if (opts.checkpointOut) {
     const cpPath = path.resolve(opts.checkpointOut);
     fs.mkdirSync(path.dirname(cpPath), { recursive: true });
-    await saveStructureNbt(world, cpPath);
+    await saveStructureNbt(world, cpPath, blockModels, resolvedMap);
     const kb = (fs.statSync(cpPath).size / 1024).toFixed(1);
     console.log(`[Checkpoint] Saved ${cpPath} (${kb} KB)`);
   }

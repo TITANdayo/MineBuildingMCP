@@ -1,5 +1,6 @@
 import path from "node:path";
 import fs from "node:fs";
+import { fileURLToPath } from "node:url";
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { loadStructureNbt, saveStructureNbt } from "../src/core/nbt-io.js";
 import { executeBuildScript } from "../src/core/builder-dsl.js";
@@ -7,19 +8,31 @@ import { JarAssetLoader } from "../src/assets/jar-loader.js";
 import { WsBridge } from "../src/mcp/ws-bridge.js";
 import { PNG } from "pngjs";
 
+const projectRoot = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
+
 describe("MineBuildingMCP End-to-End Verification", () => {
-  const sampleNbtPath = path.resolve(process.cwd(), "samples/sloped_river_terrain.nbt");
-  const exportedNbtPath = path.resolve(process.cwd(), "samples/test_exported_windmill.nbt");
+  const sampleNbtPath = path.resolve(projectRoot, "samples/sloped_river_terrain.nbt");
+  const exportedNbtPath = path.resolve(projectRoot, "samples/test_exported_windmill.nbt");
+  const mcpExportedNbtPath = path.resolve(projectRoot, "samples/mcp_tool_exported.nbt");
   let wsBridge: WsBridge;
 
   beforeAll(async () => {
-    wsBridge = new WsBridge();
+    wsBridge = new WsBridge({ wsPort: 0, vitePort: 0, openViewer: false });
     await wsBridge.start();
   }, 30000);
 
   afterAll(async () => {
     if (wsBridge) {
       await wsBridge.stop();
+    }
+    for (const tmpPath of [exportedNbtPath, mcpExportedNbtPath]) {
+      try {
+        if (fs.existsSync(tmpPath)) {
+          fs.unlinkSync(tmpPath);
+        }
+      } catch {
+        // ignore cleanup errors
+      }
     }
   });
 
@@ -243,7 +256,7 @@ describe("MineBuildingMCP End-to-End Verification", () => {
       expect(diamondHitV!).toBeLessThan(lowerStructureHitV!);
 
       // 4. export_structure
-      const outPath = path.resolve(process.cwd(), "samples/mcp_tool_exported.nbt");
+      const outPath = mcpExportedNbtPath;
       const exportRes = await mcpServer.handleExportStructure({ outputPath: outPath });
       expect(exportRes.isError).toBeFalsy();
       expect(fs.existsSync(outPath)).toBe(true);
@@ -729,7 +742,7 @@ describe("MineBuildingMCP End-to-End Verification", () => {
     expect(placedNames.has("minecraft:yellow_carpet")).toBe(true);
 
     // 5. Native Node ESM check on compiled dist/core/nbt-io.js (if built)
-    const distNbtPath = path.resolve(process.cwd(), "dist/core/nbt-io.js");
+    const distNbtPath = path.resolve(projectRoot, "dist/core/nbt-io.js");
     if (fs.existsSync(distNbtPath)) {
       const proc = spawnSync(
         process.execPath,
@@ -738,7 +751,7 @@ describe("MineBuildingMCP End-to-End Verification", () => {
           "-e",
           'import { serializeMcstructureBuffer, parseMcstructureBuffer } from "./dist/core/nbt-io.js"; import { VoxelWorld } from "./dist/core/voxel-world.js"; const w = new VoxelWorld([4,4,4]); w.setVoxel(1,1,1,"minecraft:oak_stairs",{facing:"north"},false,1); const buf = await serializeMcstructureBuffer(w); const r = await parseMcstructureBuffer(buf); console.log(JSON.stringify({ bytes: buf.length, restored: r.getVoxel(1,1,1)?.name }));',
         ],
-        { cwd: process.cwd(), encoding: "utf8" }
+        { cwd: projectRoot, encoding: "utf8" }
       );
       expect(proc.status).toBe(0);
       const out = JSON.parse(proc.stdout.trim());
@@ -1974,7 +1987,7 @@ describe("MineBuildingMCP End-to-End Verification", () => {
     expect(hasVoxel(cutE5d, 18, 6, 14)).toBe(false);
   });
 
-  it("11. Free camera movement, zoom, and custom view pixel picking via render_camera + inspect_pixel(custom)", async () => {
+  it("18. Free camera movement, zoom, and custom view pixel picking via render_camera + inspect_pixel(custom)", async () => {
     const { MineBuildingMcpServer } = await import("../src/mcp/server.js");
     const mcpServer = new MineBuildingMcpServer({
       wsPort: 0,

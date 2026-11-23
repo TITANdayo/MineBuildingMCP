@@ -148,15 +148,18 @@ function parseMcstructureFromNbt(parsed: nbtNamespace.NBT): VoxelWorld {
     : [];
 
   if (layer0.length > 0) {
+    const isAirPalette = palette.map((entry) => isAirBlock(entry.name));
+    const yzStride = origSizeY * origSizeZ;
     for (let x = 0; x < sizeX; x++) {
+      const xOffset = x * yzStride;
       for (let y = 0; y < sizeY; y++) {
+        const xyOffset = xOffset + y * origSizeZ;
         for (let z = 0; z < sizeZ; z++) {
-          const index = x * (origSizeY * origSizeZ) + y * origSizeZ + z;
-          const paletteIdx = layer0[index];
+          const paletteIdx = layer0[xyOffset + z];
           if (paletteIdx === undefined || paletteIdx < 0) continue;
+          if (isAirPalette[paletteIdx]) continue;
           const paletteEntry = palette[paletteIdx];
           if (!paletteEntry) continue;
-          if (isAirBlock(paletteEntry.name)) continue;
 
           world.setVoxel(
             x,
@@ -192,15 +195,18 @@ export async function parseMcstructureBuffer(
 
 function computeResolvedExportStates(
   world: VoxelWorld,
-  blockModels?: Record<string, CompiledBlockDefinition>
+  blockModels?: Record<string, CompiledBlockDefinition>,
+  preResolvedStates?: Map<string, BlockState>
 ): Map<string, BlockState> {
+  if (preResolvedStates) return preResolvedStates;
   const allVoxels = world.getAllVoxels();
   if (allVoxels.length === 0) return new Map();
 
   let effectiveModels = blockModels;
   if (!effectiveModels && defaultJarAssetLoader.getJarPath() !== null) {
-    const uniqueNames = Array.from(new Set(allVoxels.map((v) => v.name)));
-    effectiveModels = defaultJarAssetLoader.getBlockModelsForBlocks(uniqueNames);
+    effectiveModels = defaultJarAssetLoader.getBlockModelsForBlocks(
+      world.getUniqueBlockNames()
+    );
   }
   if (!effectiveModels) return new Map();
 
@@ -213,12 +219,18 @@ function computeResolvedExportStates(
 
 export async function serializeMcstructureBuffer(
   world: VoxelWorld,
-  blockModels?: Record<string, CompiledBlockDefinition>
+  blockModels?: Record<string, CompiledBlockDefinition>,
+  preResolvedStates?: Map<string, BlockState>
 ): Promise<Buffer> {
-  const resolvedStates = computeResolvedExportStates(world, blockModels);
+  const resolvedStates = computeResolvedExportStates(
+    world,
+    blockModels,
+    preResolvedStates
+  );
   const [sizeX, sizeY, sizeZ] = world.size;
   const totalVoxels = sizeX * sizeY * sizeZ;
-  const layer0 = new Array<number>(totalVoxels).fill(-1);
+  // Fill layer0 with 0 (minecraft:air) and layer1 (waterlog layer) with -1
+  const layer0 = new Array<number>(totalVoxels).fill(0);
   const layer1 = new Array<number>(totalVoxels).fill(-1);
 
   const paletteMap = new Map<
@@ -227,7 +239,6 @@ export async function serializeMcstructureBuffer(
   >();
 
   // Always include minecraft:air at index 0 so empty structures have a valid non-empty Compound list
-  // and air blocks have a canonical palette entry if needed
   const airTranslated = javaToBedrockState("minecraft:air");
   paletteMap.set("minecraft:air", {
     index: 0,
@@ -235,34 +246,36 @@ export async function serializeMcstructureBuffer(
     bedrockStates: airTranslated.states,
   });
 
-  // Fill layer0 with 0 (minecraft:air) by default, and overwrite with palette index for non-air blocks
-  layer0.fill(0);
+  // Iterate only existing non-air voxels in deterministic (x, y, z) order instead of O(sizeX*sizeY*sizeZ) Map lookups
+  const sortedVoxels = world.getAllVoxels().sort((a, b) => {
+    if (a.x !== b.x) return a.x - b.x;
+    if (a.y !== b.y) return a.y - b.y;
+    return a.z - b.z;
+  });
 
-  for (let x = 0; x < sizeX; x++) {
-    for (let y = 0; y < sizeY; y++) {
-      for (let z = 0; z < sizeZ; z++) {
-        const voxel = world.getVoxel(x, y, z);
-        if (!voxel || isAirBlock(voxel.name)) {
-          continue;
-        }
-        const resolved = resolvedStates.get(VoxelWorld.coordKey(x, y, z));
-        const effectiveState =
-          resolved && Object.keys(resolved).length > 0 ? resolved : voxel.state;
-        const key = makePaletteKey(voxel.name, effectiveState);
-        let pEntry = paletteMap.get(key);
-        if (!pEntry) {
-          const translated = javaToBedrockState(voxel.name, effectiveState);
-          pEntry = {
-            index: paletteMap.size,
-            bedrockName: translated.name,
-            bedrockStates: translated.states,
-          };
-          paletteMap.set(key, pEntry);
-        }
-        const flatIndex = x * (sizeY * sizeZ) + y * sizeZ + z;
-        layer0[flatIndex] = pEntry.index;
-      }
+  const yzStride = sizeY * sizeZ;
+  for (const voxel of sortedVoxels) {
+    if (isAirBlock(voxel.name)) {
+      continue;
     }
+    const resolved = resolvedStates.get(
+      VoxelWorld.coordKey(voxel.x, voxel.y, voxel.z)
+    );
+    const effectiveState =
+      resolved && Object.keys(resolved).length > 0 ? resolved : voxel.state;
+    const key = makePaletteKey(voxel.name, effectiveState);
+    let pEntry = paletteMap.get(key);
+    if (!pEntry) {
+      const translated = javaToBedrockState(voxel.name, effectiveState);
+      pEntry = {
+        index: paletteMap.size,
+        bedrockName: translated.name,
+        bedrockStates: translated.states,
+      };
+      paletteMap.set(key, pEntry);
+    }
+    const flatIndex = voxel.x * yzStride + voxel.y * sizeZ + voxel.z;
+    layer0[flatIndex] = pEntry.index;
   }
 
   const blockPaletteEntries = Array.from(paletteMap.values()).map((entry) => {
@@ -335,9 +348,14 @@ export async function loadMcstructure(filePath: string): Promise<VoxelWorld> {
 export async function saveMcstructure(
   world: VoxelWorld,
   filePath: string,
-  blockModels?: Record<string, CompiledBlockDefinition>
+  blockModels?: Record<string, CompiledBlockDefinition>,
+  preResolvedStates?: Map<string, BlockState>
 ): Promise<void> {
-  const buffer = await serializeMcstructureBuffer(world, blockModels);
+  const buffer = await serializeMcstructureBuffer(
+    world,
+    blockModels,
+    preResolvedStates
+  );
   await fs.writeFile(filePath, buffer);
 }
 
@@ -446,9 +464,14 @@ function makePaletteKey(name: string, state?: BlockState): string {
 
 export async function serializeStructureNbtBuffer(
   world: VoxelWorld,
-  blockModels?: Record<string, CompiledBlockDefinition>
+  blockModels?: Record<string, CompiledBlockDefinition>,
+  preResolvedStates?: Map<string, BlockState>
 ): Promise<Buffer> {
-  const resolvedStates = computeResolvedExportStates(world, blockModels);
+  const resolvedStates = computeResolvedExportStates(
+    world,
+    blockModels,
+    preResolvedStates
+  );
   const paletteMap = new Map<
     string,
     { index: number; name: string; state?: BlockState }
@@ -573,12 +596,17 @@ export async function serializeStructureNbtBuffer(
 export async function saveStructureNbt(
   world: VoxelWorld,
   filePath: string,
-  blockModels?: Record<string, CompiledBlockDefinition>
+  blockModels?: Record<string, CompiledBlockDefinition>,
+  preResolvedStates?: Map<string, BlockState>
 ): Promise<void> {
   if (filePath.toLowerCase().endsWith(".mcstructure")) {
-    await saveMcstructure(world, filePath, blockModels);
+    await saveMcstructure(world, filePath, blockModels, preResolvedStates);
     return;
   }
-  const gzipped = await serializeStructureNbtBuffer(world, blockModels);
+  const gzipped = await serializeStructureNbtBuffer(
+    world,
+    blockModels,
+    preResolvedStates
+  );
   await fs.writeFile(filePath, gzipped);
 }
